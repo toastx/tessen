@@ -38,7 +38,23 @@ pub mod stocklana {
         pool.total_shares = 0;
         pool.locked = 0;
         pool.available = 0;
+        pool.epoch = 0;
+        pool.epoch_end = 0;
         pool.bump = ctx.bumps.pool;
+        Ok(())
+    }
+
+    /// Opens the next epoch. Every option written in it expires at `epoch_end`,
+    /// so NAV can only move at a boundary. Keeper passes now+86400 for daily.
+    pub fn roll_epoch(ctx: Context<RollEpoch>, epoch_end: i64) -> Result<()> {
+        require!(
+            epoch_end > Clock::get()?.unix_timestamp,
+            StockError::BadExpiry
+        );
+        let pool = &mut ctx.accounts.pool;
+        require!(pool.locked == 0, StockError::EpochActive);
+        pool.epoch += 1;
+        pool.epoch_end = epoch_end;
         Ok(())
     }
 
@@ -69,6 +85,7 @@ pub mod stocklana {
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, StockError::ZeroAmount);
         let pool = &mut ctx.accounts.pool;
+        require!(pool.locked == 0, StockError::EpochActive);
         let assets = pool.assets()?;
         let shares = if pool.total_shares == 0 {
             amount
@@ -101,6 +118,7 @@ pub mod stocklana {
     pub fn withdraw(ctx: Context<Withdraw>, shares: u64) -> Result<()> {
         let pool = &mut ctx.accounts.pool;
         let lp = &mut ctx.accounts.lp;
+        require!(pool.locked == 0, StockError::EpochActive);
         require!(shares > 0 && shares <= lp.shares, StockError::ZeroAmount);
         let amount = mul_div(shares, pool.assets()?, pool.total_shares)?;
         require!(amount <= pool.available, StockError::InsufficientAvailable);
@@ -132,14 +150,21 @@ pub mod stocklana {
         id: u64,
         strike: u64,
         size: u64,
-        expiry: i64,
         premium: u64,
         quote_expiry: i64,
     ) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
+        let expiry = ctx.accounts.pool.epoch_end;
         require!(now <= quote_expiry, StockError::QuoteExpired);
-        require!(expiry > now, StockError::BadExpiry);
-        require!(strike > 0 && size > 0, StockError::ZeroAmount);
+        require!(now < expiry, StockError::EpochClosed);
+        require!(strike > 0 && size > 0 && premium > 0, StockError::ZeroAmount);
+
+        // an option is never worth less than its intrinsic value, whatever the backend signs
+        let spot = median(&ctx.accounts.oracle)?;
+        require!(
+            premium >= payoff(ctx.accounts.pool.kind, strike, size, spot)?,
+            StockError::PremiumBelowIntrinsic
+        );
 
         let pool = &mut ctx.accounts.pool;
         let collateral = required_collateral(pool.kind, strike, size)?;
@@ -272,6 +297,8 @@ pub struct Pool {
     pub total_shares: u64,
     pub locked: u64,
     pub available: u64,
+    pub epoch: u64,
+    pub epoch_end: i64,
     pub kind: u8,
     pub bump: u8,
 }
@@ -364,6 +391,13 @@ pub struct InitOracle<'info> {
 }
 
 #[derive(Accounts)]
+pub struct RollEpoch<'info> {
+    #[account(mut, has_one = authority)]
+    pub pool: Account<'info, Pool>,
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
 pub struct PushPrice<'info> {
     #[account(mut, has_one = keeper @ StockError::NotKeeper)]
     pub oracle: Account<'info, Oracle>,
@@ -418,8 +452,9 @@ pub struct BuyOption<'info> {
     pub buyer: Signer<'info>,
     #[account(address = pool.quote_signer @ StockError::BadQuoteSigner)]
     pub quote_signer: Signer<'info>,
-    #[account(mut, has_one = vault)]
+    #[account(mut, has_one = vault, has_one = oracle)]
     pub pool: Account<'info, Pool>,
+    pub oracle: Account<'info, Oracle>,
     #[account(mut)]
     pub vault: Account<'info, TokenAccount>,
     #[account(mut, token::mint = pool.collateral_mint, token::authority = buyer)]
@@ -474,6 +509,12 @@ pub enum StockError {
     QuoteExpired,
     #[msg("bad quote signer")]
     BadQuoteSigner,
+    #[msg("premium is below the option intrinsic value")]
+    PremiumBelowIntrinsic,
+    #[msg("epoch has open positions")]
+    EpochActive,
+    #[msg("epoch is closed for new options")]
+    EpochClosed,
     #[msg("expiry must be in the future")]
     BadExpiry,
     #[msg("option has not expired")]

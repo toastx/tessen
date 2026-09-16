@@ -45,6 +45,15 @@ describe("stocklana cash-secured put vault", () => {
   const chainTime = async () =>
     (await provider.connection.getBlockTime(await provider.connection.getSlot())) as number;
 
+  const pushPrices = async (prices: number[]) => {
+    for (const price of prices) {
+      await program.methods
+        .pushPrice(usd(price))
+        .accountsPartial({ oracle, keeper: admin.publicKey })
+        .rpc();
+    }
+  };
+
   before(async () => {
     for (const kp of [lp, buyer]) {
       const sig = await provider.connection.requestAirdrop(kp.publicKey, 2 * LAMPORTS_PER_SOL);
@@ -93,6 +102,16 @@ describe("stocklana cash-secured put vault", () => {
         systemProgram: SystemProgram.programId,
       })
       .rpc();
+
+    // one epoch, one expiry; a keeper would pass now + 86400 for daily
+    expiry = (await chainTime()) + 15;
+    await program.methods
+      .rollEpoch(new BN(expiry))
+      .accountsPartial({ pool, authority: admin.publicKey })
+      .rpc();
+
+    // spot is $220 when the puts are written, so all three start out of the money
+    await pushPrices([218, 220, 222, 220, 221]);
   });
 
   it("deposits collateral and mints shares", async () => {
@@ -126,21 +145,14 @@ describe("stocklana cash-secured put vault", () => {
   let expiry: number;
 
   it("sells puts and locks full collateral", async () => {
-    expiry = (await chainTime()) + 5;
     for (const c of cases) {
       await program.methods
-        .buyOption(
-          new BN(c.id),
-          usd(c.strike),
-          new BN(S),
-          new BN(expiry),
-          usd(c.premium),
-          new BN(expiry + 60)
-        )
+        .buyOption(new BN(c.id), usd(c.strike), new BN(S), usd(c.premium), new BN(expiry + 60))
         .accountsPartial({
           buyer: buyer.publicKey,
           quoteSigner: admin.publicKey,
           pool,
+          oracle,
           vault,
           buyerToken,
           position: positionPda(c.id),
@@ -161,11 +173,12 @@ describe("stocklana cash-secured put vault", () => {
     const rogue = Keypair.generate();
     try {
       await program.methods
-        .buyOption(new BN(9), usd(200), new BN(S), new BN(expiry), usd(1), new BN(expiry + 60))
+        .buyOption(new BN(9), usd(200), new BN(S), usd(1), new BN(expiry + 60))
         .accountsPartial({
           buyer: buyer.publicKey,
           quoteSigner: rogue.publicKey,
           pool,
+          oracle,
           vault,
           buyerToken,
           position: positionPda(9),
@@ -180,15 +193,55 @@ describe("stocklana cash-secured put vault", () => {
     }
   });
 
-  it("settles on the median of the oracle samples", async () => {
-    for (const price of [198, 200, 202, 200, 205]) {
+  it("rejects a premium below intrinsic value", async () => {
+    // $260 strike put at a $220 spot is $40 in the money; nobody sells that for $1
+    try {
       await program.methods
-        .pushPrice(usd(price))
-        .accountsPartial({ oracle, keeper: admin.publicKey })
+        .buyOption(new BN(8), usd(260), new BN(S), usd(1), new BN(expiry + 60))
+        .accountsPartial({
+          buyer: buyer.publicKey,
+          quoteSigner: admin.publicKey,
+          pool,
+          oracle,
+          vault,
+          buyerToken,
+          position: positionPda(8),
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([buyer])
         .rpc();
+      assert.fail("expected PremiumBelowIntrinsic");
+    } catch (e) {
+      assert.include(e.toString(), "PremiumBelowIntrinsic");
     }
+  });
+
+  it("locks writers in while the epoch has open positions", async () => {
+    try {
+      await program.methods
+        .withdraw(new BN(1 * S))
+        .accountsPartial({
+          user: lp.publicKey,
+          pool,
+          vault,
+          userToken: lpToken,
+          lp: lpPos,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([lp])
+        .rpc();
+      assert.fail("expected EpochActive");
+    } catch (e) {
+      assert.include(e.toString(), "EpochActive");
+    }
+  });
+
+  it("settles on the median of the oracle samples", async () => {
+    // spot drops to $200 and fills the ring buffer; the $500 print is an outlier the median ignores
+    await pushPrices([...Array(13).fill(200), 198, 202, 500]);
     const o = await program.account.oracle.fetch(oracle);
-    assert.equal(o.count, 5);
+    assert.equal(o.count, 16);
 
     while ((await chainTime()) < expiry) {
       await new Promise((r) => setTimeout(r, 500));
