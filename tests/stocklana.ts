@@ -205,11 +205,16 @@ describe("stocklana cash-secured put vault", () => {
       .rpc();
   };
 
-  const roll = (epochEnd: number) =>
+  const rollFor = (poolKey: PublicKey, epochEnd: number) =>
     program.methods
       .rollEpoch(new BN(epochEnd))
-      .accountsPartial({ pool, authority: admin.publicKey })
+      .accountsPartial({ pool: poolKey, authority: admin.publicKey })
       .rpc();
+
+  const roll = (epochEnd: number) => rollFor(pool, epochEnd);
+
+  // anchor decodes a fieldless enum as a single-key object: { open: {} }
+  const stateOf = (p: { state: object }) => Object.keys(p.state)[0];
 
   const buyPut = (id: number, strike: number, premium: number, quoteExpiry: number) =>
     program.methods
@@ -256,6 +261,50 @@ describe("stocklana cash-secured put vault", () => {
       })
       .signers([lp])
       .rpc();
+
+  const newFeed = async () => {
+    const u = await createMint(provider.connection, admin, admin.publicKey, null, 6);
+    const [o] = PublicKey.findProgramAddressSync(
+      [Buffer.from("oracle"), u.toBuffer()],
+      program.programId
+    );
+    await program.methods
+      .initOracle(admin.publicKey)
+      .accountsPartial({
+        admin: admin.publicKey,
+        underlying: u,
+        oracle: o,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    return { underlying: u, oracle: o, feed: makeFeed(o) };
+  };
+
+  const newPool = async (oracleKey: PublicKey, underlyingMint: PublicKey) => {
+    const collateral = await createMint(provider.connection, admin, admin.publicKey, null, 6);
+    const [p] = PublicKey.findProgramAddressSync(
+      [Buffer.from("pool"), collateral.toBuffer(), Buffer.from([PUT])],
+      program.programId
+    );
+    const [v] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), p.toBuffer()],
+      program.programId
+    );
+    await program.methods
+      .initPool(PUT, admin.publicKey, poolKeeper.publicKey)
+      .accountsPartial({
+        admin: admin.publicKey,
+        collateralMint: collateral,
+        underlying: underlyingMint,
+        oracle: oracleKey,
+        pool: p,
+        vault: v,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    return p;
+  };
 
   // the price an LP mints or redeems at: NAV over shares
   const sharePrice = async () => {
@@ -488,6 +537,17 @@ describe("stocklana cash-secured put vault", () => {
     await expectRevert(() => settlePosition(cases[0].id), "AccountNotInitialized");
   });
 
+  it("refuses a new option once the epoch has run out of time", async () => {
+    // the epoch is still `open` — nothing has closed it — but its boundary has
+    // passed, and that is a different rejection from a closed or never-opened one
+    await expectRevert(
+      async () => buyPut(7, 180, 1, (await chainTime()) + 60),
+      "EpochExpired"
+    );
+    assert.equal(stateOf(await program.account.pool.fetch(pool)), "open");
+    assert.isNull(await provider.connection.getAccountInfo(positionPda(7)));
+  });
+
   it("rejects a push that deviates more than 10% from the median", async () => {
     // the median is $200; $500 is the decimal slip this guard exists to catch
     await expectRevert(
@@ -520,7 +580,7 @@ describe("stocklana cash-secured put vault", () => {
     await closeEpoch();
     const p = await program.account.pool.fetch(pool);
     assert.equal(p.settlePrice.toNumber(), 200 * S);
-    assert.equal(p.settledEpoch.toNumber(), 1);
+    assert.equal(stateOf(p), "closed");
 
     // spot slides to $182 after the latch: a second close must not re-pick the
     // price off the newer median, and settlement below still pays at $200
@@ -632,7 +692,7 @@ describe("stocklana cash-secured put vault", () => {
 
     const p = await program.account.pool.fetch(pool);
     assert.equal(p.epoch.toNumber(), 2);
-    assert.equal(p.settledEpoch.toNumber(), 1, "epoch 2 is not closed yet");
+    assert.equal(stateOf(p), "open", "epoch 2 is not closed yet");
     assert.equal(p.epochEnd.toNumber(), expiry2);
     assert.equal(p.epochPositions, 0, "the round counters reset at the roll");
     assert.equal(p.epochPremium.toNumber(), 0);
@@ -683,7 +743,7 @@ describe("stocklana cash-secured put vault", () => {
 
     const latched = await program.account.pool.fetch(pool);
     assert.equal(latched.settlePrice.toNumber(), 190 * S);
-    assert.equal(latched.settledEpoch.toNumber(), 2);
+    assert.equal(stateOf(latched), "closed");
 
     for (const c of epoch2) {
       await settlePosition(c.id);
@@ -730,7 +790,7 @@ describe("stocklana cash-secured put vault", () => {
 
     const p = await program.account.pool.fetch(pool);
     assert.equal(p.epoch.toNumber(), 3);
-    assert.equal(p.settledEpoch.toNumber(), 2);
+    assert.equal(stateOf(p), "open");
     assert.equal(await sharePrice(), priceBefore, "the roll itself must not move the price");
 
     await expectRevert(() => closeEpoch(), "EpochNotEnded");
@@ -744,7 +804,7 @@ describe("stocklana cash-secured put vault", () => {
 
     const p = await program.account.pool.fetch(pool);
     assert.equal(p.settlePrice.toNumber(), 230 * S);
-    assert.equal(p.settledEpoch.toNumber(), 3);
+    assert.equal(stateOf(p), "closed");
 
     // position 5 belongs to epoch 2; at $230 a $180 put is still worthless, but a
     // $230 latch must never be applied to it at all. The epoch check runs ahead of
@@ -869,50 +929,6 @@ describe("stocklana cash-secured put vault", () => {
     let early: PublicKey, late: PublicKey;
     let windowEnd: number;
 
-    const newFeed = async () => {
-      const u = await createMint(provider.connection, admin, admin.publicKey, null, 6);
-      const [o] = PublicKey.findProgramAddressSync(
-        [Buffer.from("oracle"), u.toBuffer()],
-        program.programId
-      );
-      await program.methods
-        .initOracle(admin.publicKey)
-        .accountsPartial({
-          admin: admin.publicKey,
-          underlying: u,
-          oracle: o,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-      return { underlying: u, oracle: o, feed: makeFeed(o) };
-    };
-
-    const newPool = async (oracleKey: PublicKey, underlyingMint: PublicKey) => {
-      const collateral = await createMint(provider.connection, admin, admin.publicKey, null, 6);
-      const [p] = PublicKey.findProgramAddressSync(
-        [Buffer.from("pool"), collateral.toBuffer(), Buffer.from([PUT])],
-        program.programId
-      );
-      const [v] = PublicKey.findProgramAddressSync(
-        [Buffer.from("vault"), p.toBuffer()],
-        program.programId
-      );
-      await program.methods
-        .initPool(PUT, admin.publicKey, poolKeeper.publicKey)
-        .accountsPartial({
-          admin: admin.publicKey,
-          collateralMint: collateral,
-          underlying: underlyingMint,
-          oracle: oracleKey,
-          pool: p,
-          vault: v,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
-      return p;
-    };
-
     before(async () => {
       const f = await newFeed();
       windowOracle = f.oracle;
@@ -924,14 +940,8 @@ describe("stocklana cash-secured put vault", () => {
       await windowFeed.push([...Array(12).fill(100), 110]);
 
       windowEnd = (await chainTime()) + 12;
-      await program.methods
-        .rollEpoch(new BN(windowEnd))
-        .accountsPartial({ pool: early, authority: admin.publicKey })
-        .rpc();
-      await program.methods
-        .rollEpoch(new BN(windowEnd))
-        .accountsPartial({ pool: late, authority: admin.publicKey })
-        .rpc();
+      await rollFor(early, windowEnd);
+      await rollFor(late, windowEnd);
       await waitFor(windowEnd);
     });
 
@@ -974,10 +984,7 @@ describe("stocklana cash-secured put vault", () => {
 
     it("follows a sustained move that happens inside the window", async () => {
       const end = (await chainTime()) + 12;
-      await program.methods
-        .rollEpoch(new BN(end))
-        .accountsPartial({ pool: early, authority: admin.publicKey })
-        .rpc();
+      await rollFor(early, end);
 
       // same shape of move as the one above, on the other side of the boundary
       await windowFeed.setSpot(130);
@@ -994,10 +1001,7 @@ describe("stocklana cash-secured put vault", () => {
       await lost.feed.push(Array(12).fill(100));
 
       const end = (await chainTime()) + 8;
-      await program.methods
-        .rollEpoch(new BN(end))
-        .accountsPartial({ pool: lostPool, authority: admin.publicKey })
-        .rpc();
+      await rollFor(lostPool, end);
       // strictly past the boundary, so none of what follows counts as in-window
       await waitFor(end + 2);
 
@@ -1015,10 +1019,7 @@ describe("stocklana cash-secured put vault", () => {
       await thin.feed.push(Array(MIN_SETTLEMENT_SAMPLES - 1).fill(100));
 
       const end = (await chainTime()) + 8;
-      await program.methods
-        .rollEpoch(new BN(end))
-        .accountsPartial({ pool: thinPool, authority: admin.publicKey })
-        .rpc();
+      await rollFor(thinPool, end);
       await waitFor(end);
 
       await expectRevert(
@@ -1029,6 +1030,33 @@ describe("stocklana cash-secured put vault", () => {
         await provider.connection.getAccountInfo(epochRecordPda(thinPool, 1)),
         "a failed close leaves no record behind"
       );
+    });
+  });
+
+  // ---- genesis: a pool that has never opened an epoch ----
+
+  describe("genesis epoch state", () => {
+    it("rolls from genesis straight into epoch 1, with no close in between", async () => {
+      const fresh = await newPool(oracle, underlying);
+
+      const born = await program.account.pool.fetch(fresh);
+      assert.equal(stateOf(born), "genesis");
+      assert.equal(born.epoch.toNumber(), 0);
+      // zero, and unambiguously not a settlement: the state says so, and nothing
+      // reads this field unless the state is `closed`
+      assert.equal(born.settlePrice.toNumber(), 0);
+
+      await rollFor(fresh, (await chainTime()) + 60);
+
+      const opened = await program.account.pool.fetch(fresh);
+      assert.equal(opened.epoch.toNumber(), 1);
+      assert.equal(stateOf(opened), "open");
+    });
+
+    it("refuses to close an epoch the pool never opened", async () => {
+      const fresh = await newPool(oracle, underlying);
+      await expectRevert(() => closeEpochFor(fresh, oracle), "EpochNotStarted");
+      assert.equal(stateOf(await program.account.pool.fetch(fresh)), "genesis");
     });
   });
 });

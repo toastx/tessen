@@ -21,6 +21,24 @@ pub const MIN_SETTLEMENT_SAMPLES: usize = 8;
 /// Floor on the deposit that sets the share scale at genesis.
 pub const MIN_FIRST_DEPOSIT: u64 = 1_000_000;
 
+/// Where the pool is in the epoch cycle. `Genesis` is a pool that has never
+/// opened an epoch, and it is a state in its own right rather than epoch 0
+/// dressed up as a round that settled at a price of zero.
+///
+/// ponytail: three states, with no `Paused` and no `Voided`. The transitions are
+/// a closed cycle — `Genesis | Closed -> Open -> Closed` — and every instruction
+/// is reachable from exactly one of them, so a fourth variant would today buy
+/// nothing but unreachable code. `Voided` is the variant to add if the
+/// round-cannot-close tail case described in `close_epoch` ever needs the remedy
+/// that ponytail names: it wants a round that is finished without ever having
+/// had a price, which is precisely what none of these three can express.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
+pub enum EpochState {
+    Genesis,
+    Open,
+    Closed,
+}
+
 #[macro_export]
 macro_rules! pool_seeds {
     ($pool:expr) => {
@@ -89,13 +107,7 @@ pub mod stocklana {
         pool.epoch = 0;
         pool.epoch_end = 0;
         pool.settle_price = 0;
-        // ponytail: epoch 0 starts out already closed (`settled_epoch == epoch`), which
-        // is what lets the genesis `roll_epoch` through without a `close_epoch` on an
-        // epoch that never traded. It is sound because epoch 0 has `epoch_end == 0`, so
-        // `buy_option` can never write into it and `settle_price == 0` is never read.
-        // Give `Pool` an explicit `status` enum if a future epoch ever needs to be
-        // distinguishable from this pre-genesis one.
-        pool.settled_epoch = 0;
+        pool.state = EpochState::Genesis;
         pool.open_positions = 0;
         pool.epoch_premium = 0;
         pool.epoch_collateral = 0;
@@ -114,11 +126,13 @@ pub mod stocklana {
         );
         let pool = &mut ctx.accounts.pool;
         require!(pool.open_positions == 0, StockError::EpochActive);
-        // the epoch just ended must have its settlement price latched; that also
-        // proves `now >= epoch_end`, which `close_epoch` already required
-        require!(pool.settled_epoch == pool.epoch, StockError::EpochNotClosed);
+        // a `Genesis` pool has no epoch to close; anything else must have had its
+        // settlement price latched, which also proves `now >= epoch_end` because
+        // `close_epoch` already required it
+        require!(pool.state != EpochState::Open, StockError::EpochNotClosed);
         pool.epoch += 1;
         pool.epoch_end = epoch_end;
+        pool.state = EpochState::Open;
         // ponytail: the round counters live on `Pool` and are zeroed here rather
         // than being derived by indexing `buy_option` logs. The epoch is the only
         // thing they ever describe and `roll_epoch` is the one place an epoch
@@ -199,7 +213,7 @@ pub mod stocklana {
         let (price, sample_count) =
             window_median(&ctx.accounts.oracle, window_start, pool.epoch_end)?;
         pool.settle_price = price;
-        pool.settled_epoch = pool.epoch;
+        pool.state = EpochState::Closed;
 
         // ponytail: the record is written once, at the close, and the four fields
         // that cannot be known yet — `total_payout`, `positions_settled` and the
@@ -405,12 +419,7 @@ pub mod stocklana {
     ) -> Result<()> {
         let now = Clock::get()?.unix_timestamp;
         let expiry = ctx.accounts.pool.epoch_end;
-        require!(now <= quote_expiry, StockError::QuoteExpired);
-        require!(
-            quote_expiry <= now + MAX_QUOTE_TTL,
-            StockError::QuoteTtlTooLong
-        );
-        require!(now < expiry, StockError::EpochClosed);
+        require_writable(&ctx.accounts.pool, now, quote_expiry)?;
         require!(strike > 0 && size > 0 && premium > 0, StockError::ZeroAmount);
 
         // an option is never worth less than its intrinsic value, whatever the backend signs
@@ -496,11 +505,12 @@ pub mod stocklana {
         let position_key = ctx.accounts.position.key();
         let pool = &mut ctx.accounts.pool;
         let pos = &mut ctx.accounts.position;
-        // two checks, not one: above the latched epoch means the position's own
-        // epoch has no settlement price yet, below it means the position is a
-        // straggler from an earlier epoch and must never take this price
-        require!(pos.epoch <= pool.settled_epoch, StockError::EpochNotClosed);
-        require!(pos.epoch == pool.settled_epoch, StockError::EpochMismatch);
+        // two checks, not one, answering two different questions: the state says
+        // whether `pool.settle_price` is a latched price at all, and the epoch
+        // equality says whether it is THIS position's price rather than one
+        // belonging to a round the pool has already moved past
+        require!(pool.state == EpochState::Closed, StockError::EpochNotClosed);
+        require!(pos.epoch == pool.epoch, StockError::EpochMismatch);
         require!(
             Clock::get()?.unix_timestamp >= pos.expiry,
             StockError::NotExpired
@@ -531,6 +541,14 @@ pub mod stocklana {
     /// all before the epoch closes, because the record it reads does not exist
     /// until then. Give it a `voided` branch that refunds premium instead if the
     /// round-cannot-close case in `close_epoch` ever needs a remedy.
+    ///
+    /// ponytail: no `pool.state` gate, unlike `settle`, and the asymmetry is the
+    /// point. A straggler is swept long after its own round ended, by which time
+    /// the pool is usually `Open` on a later epoch — gating on the pool's current
+    /// state would lock out exactly the position this instruction exists for. The
+    /// record's existence already proves the position's own epoch closed, and its
+    /// seeds prove the record belongs to that epoch. Add a state gate only if a
+    /// sweep ever needs to be sequenced against the live round.
     pub fn force_settle(ctx: Context<ForceSettle>) -> Result<()> {
         let pool_key = ctx.accounts.pool.key();
         let position_key = ctx.accounts.position.key();
@@ -554,10 +572,10 @@ pub mod stocklana {
     /// Deliberately epoch-agnostic: `payout` is computed and frozen at settle
     /// time, `settled` is single-shot, and `has_one = pool` already binds the
     /// position to the vault that holds its money. An epoch check here (e.g.
-    /// `position.epoch == pool.settled_epoch`) would permanently strand a
+    /// `position.epoch == pool.epoch`) would permanently strand a
     /// settled-but-unclaimed position the moment the pool rolled on: by the time
-    /// the buyer came back, `settled_epoch` would point at the new epoch and the
-    /// claim could never succeed. Payouts must survive a roll, so this stays as
+    /// the buyer came back, `pool.epoch` would have moved on and the claim could
+    /// never succeed. Payouts must survive a roll, so this stays as
     /// is.
     pub fn claim(ctx: Context<Claim>) -> Result<()> {
         let payout = ctx.accounts.position.payout;
@@ -586,6 +604,34 @@ pub mod stocklana {
         });
         Ok(())
     }
+}
+
+/// Everything that has to hold about the quote and about the epoch before a
+/// position can be written into the pool at all.
+///
+/// The three epoch checks are ordered and carry distinct errors deliberately,
+/// for the same reason `CloseEpoch` orders its constraints: a pool that has
+/// never opened an epoch, a pool whose epoch has already settled, and an epoch
+/// that has merely run out of time are three different things to tell a buyer,
+/// and one shared message sends whoever is debugging a quote to the wrong place.
+/// `state` answers whether this epoch is writable at all; `now < epoch_end`
+/// answers whether there is any time left in it. The state checks come first
+/// because a `Genesis` pool has `epoch_end == 0` and so fails the time check
+/// too — ordered the other way it would report having run out of time for an
+/// epoch it never started.
+fn require_writable(pool: &Pool, now: i64, quote_expiry: i64) -> Result<()> {
+    require!(now <= quote_expiry, StockError::QuoteExpired);
+    require!(
+        quote_expiry <= now + MAX_QUOTE_TTL,
+        StockError::QuoteTtlTooLong
+    );
+    require!(
+        pool.state != EpochState::Genesis,
+        StockError::EpochNotStarted
+    );
+    require!(pool.state == EpochState::Open, StockError::EpochClosed);
+    require!(now < pool.epoch_end, StockError::EpochExpired);
+    Ok(())
 }
 
 /// Shared body of `settle` and `force_settle`: writes `pos` off against an
@@ -735,10 +781,10 @@ pub struct Pool {
     pub available: u64,
     pub epoch: u64,
     pub epoch_end: i64,
-    /// The price every position in `settled_epoch` pays out against. Only
-    /// meaningful for that epoch; stale between `roll_epoch` and `close_epoch`.
+    /// The price every position in `epoch` pays out against. Only meaningful
+    /// while `state == Closed`; stale between `roll_epoch` and `close_epoch`.
     pub settle_price: u64,
-    pub settled_epoch: u64,
+    pub state: EpochState,
     /// Written and not yet settled, across every epoch. Gates `roll_epoch` and
     /// the LP flows, and is a keeper's outstanding-settle count.
     pub open_positions: u32,
@@ -993,7 +1039,11 @@ pub struct CloseEpoch<'info> {
     #[account(
         mut,
         has_one = oracle,
-        constraint = pool.settled_epoch < pool.epoch @ StockError::EpochAlreadyClosed,
+        // ordered: raw constraints are checked in declaration order, so a pool
+        // that has never opened an epoch says so instead of claiming to have
+        // already closed one
+        constraint = pool.state != EpochState::Genesis @ StockError::EpochNotStarted,
+        constraint = pool.state == EpochState::Open @ StockError::EpochAlreadyClosed,
         constraint = pool.is_operator(operator.key()) @ StockError::NotKeeper
     )]
     pub pool: Account<'info, Pool>,
@@ -1006,9 +1056,10 @@ pub struct CloseEpoch<'info> {
     // already in use" and bury the reason — on a settlement path the operator
     // can genuinely race into, the specific error is worth more than the
     // structural guarantee. The guarantee still holds: `close_epoch` is the only
-    // writer, it requires `settled_epoch < epoch`, and `roll_epoch` only ever
-    // increments `epoch`, so no epoch number is ever presented twice. Go back to
-    // `init` if `Pool.epoch` ever stops being monotonic.
+    // writer, it requires `state == Open`, and the only way back to `Open` is
+    // `roll_epoch`, which increments `epoch` — so no epoch number is ever
+    // presented twice. Go back to `init` if `Pool.epoch` ever stops being
+    // monotonic.
     #[account(
         init_if_needed,
         payer = operator,
@@ -1200,6 +1251,10 @@ pub enum StockError {
     InsufficientSamples,
     #[msg("signer is not the pool authority")]
     NotAuthority,
+    #[msg("pool has not opened an epoch yet")]
+    EpochNotStarted,
+    #[msg("epoch has run out of time for new options")]
+    EpochExpired,
 }
 
 #[cfg(test)]
