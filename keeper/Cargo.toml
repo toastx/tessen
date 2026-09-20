@@ -1,0 +1,18 @@
+[package]
+name = "stocklana-keeper"
+version = "0.1.0"
+edition = "2021"
+
+# Detached from the on-chain workspace on purpose: the program's build is
+# fragile (see CLAUDE.md) and must not have client-only deps folded into its
+# lockfile. This crate keeps its own Cargo.lock.
+[workspace]
+
+[[bin]]
+name = "keeper"
+path = "src/main.rs"
+
+[dependencies]
+anchor-client = "0.32.2"
+# host build of the program crate for its account/instruction types only
+stocklana = { path = "../programs/stocklana", features = ["no-entrypoint"] }
