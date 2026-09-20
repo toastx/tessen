@@ -23,6 +23,10 @@ const PUT = 0;
 const RING = 32;
 // the program's own floor: fewer in-window samples than this and the epoch refuses to latch
 const MIN_SETTLEMENT_SAMPLES = 8;
+// the program's floor on the gap between two accepted pushes. Every push in this
+// suite now has to be spaced by at least this much chain time — the ring can no
+// longer be stuffed, and the suite pays for that in wall clock seconds.
+const MIN_PUSH_INTERVAL = 30;
 const usd = (n: number) => new BN(n * S);
 
 describe("stocklana cash-secured put vault", () => {
@@ -85,27 +89,30 @@ describe("stocklana cash-secured put vault", () => {
 
     const median = () => medianOf(ring);
 
-    // pushes batched ten to a transaction: walking the guard costs ~17 pushes per
-    // 10% step and one transaction each would dominate the suite's runtime
+    // The push floor means samples can no longer share a transaction. Each push
+    // is its own transaction preceded by a wait that guarantees at least
+    // MIN_PUSH_INTERVAL of chain time has passed since the previous one.
     const send = async (micros: number[]) => {
-      for (let i = 0; i < micros.length; i += 10) {
-        const chunk = micros.slice(i, i + 10);
+      let last = 0;
+      for (const price of micros) {
+        const now = await chainTime();
+        const target = last === 0 ? now : last + MIN_PUSH_INTERVAL;
+        while ((await chainTime()) < target) {
+          await new Promise((r) => setTimeout(r, 250));
+        }
         const tx = new Transaction().add(
           ComputeBudgetProgram.setComputeUnitLimit({ units: 900_000 + batchNonce++ })
         );
-        for (const price of chunk) {
-          tx.add(
-            await program.methods
-              .pushPrice(new BN(price))
-              .accountsPartial({ oracle: oracleKey, keeper: admin.publicKey })
-              .instruction()
-          );
-        }
+        tx.add(
+          await program.methods
+            .pushPrice(new BN(price))
+            .accountsPartial({ oracle: oracleKey, keeper: admin.publicKey })
+            .instruction()
+        );
         await provider.sendAndConfirm(tx, []);
-        for (const price of chunk) {
-          ring[idx] = price;
-          idx = (idx + 1) % RING;
-        }
+        last = await chainTime();
+        ring[idx] = price;
+        idx = (idx + 1) % RING;
       }
     };
 

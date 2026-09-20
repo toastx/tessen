@@ -15,20 +15,13 @@ permanently in an `EpochRecord` PDA at `[b"epoch", pool, epoch]`.
 
 Keeper-or-authority gates `close_epoch` and `settle`; `force_settle` is
 authority-only. Nothing in the program accepts a settlement price as an
-argument — see the ponytails on `close_epoch` for why, and for what the recovery
-path is when a keeper closes too late.
+argument. If a keeper closes too late the in-window samples have rotated out of
+the ring and the epoch cannot close at all — stop the price feed first, then
+close.
 
 ## Fixed-point convention
 
 Every price, strike and size is 1e6 scale — see `SCALE` at programs/stocklana/src/lib.rs:8. Size `1_000_000` == 1 contract == 1 underlying token (underlying mint must have 6 decimals).
-
-## The ponytail convention
-
-A `ponytail:` comment marks a DELIBERATE simplification, sited at the code it explains, stating what was chosen, why it is sufficient under current constraints, and the concrete upgrade path if those constraints change. It is not a TODO and not an apology — it is a tied-off loose end.
-
-Format: `// ponytail: <what was chosen>. <why it's enough here>. <what to swap in if X changes>.`
-
-Rules: one per non-obvious decision, none for obvious ones; never use it to excuse a bug; if there is no plausible future where the simplification breaks, delete the comment instead of writing it. Any non-obvious choice you make gets a ponytail comment.
 
 ## Complexity
 

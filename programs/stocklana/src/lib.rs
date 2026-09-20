@@ -20,6 +20,15 @@ pub const SETTLEMENT_WINDOW: i64 = 1_800;
 pub const MIN_SETTLEMENT_SAMPLES: usize = 8;
 /// Floor on the deposit that sets the share scale at genesis.
 pub const MIN_FIRST_DEPOSIT: u64 = 1_000_000;
+/// The shortest gap between two accepted pushes. 32 slots at this cadence span
+/// at least 16 minutes, so the ring cannot be stuffed with samples all taken
+/// inside one settlement window.
+pub const MIN_PUSH_INTERVAL: i64 = 30;
+/// The shortest span a settlement window's samples must cover. Defense in depth
+/// behind `MIN_PUSH_INTERVAL`.
+pub const MIN_SETTLEMENT_SPAN: i64 = 900;
+/// Floor on a quote's premium, in bps of the position's collateral.
+pub const MIN_PREMIUM_BPS: u64 = 10;
 
 /// Where the pool is in the epoch cycle. `Genesis` is a pool that has never
 /// opened an epoch, and it is a state in its own right rather than epoch 0
@@ -66,15 +75,7 @@ pub mod stocklana {
             ctx.accounts.oracle.underlying == ctx.accounts.underlying.key(),
             StockError::OracleMintMismatch
         );
-        // ponytail: covered-call vaults are collateralised in the very underlying
-        // they write calls on (payoff is paid in underlying, see `payoff` for
-        // KIND_CALL); cash-secured put vaults are collateralised in a different
-        // mint (USDC) from the underlying they price against. Anchoring the
-        // relationship on the explicit `underlying` account rather than on the
-        // oracle's own field is what stops a pool from being pointed at the wrong
-        // preStock's oracle. Splitting the two relationships here covers both
-        // kinds; move to a per-pool collateral whitelist if a third kind ever
-        // needs a looser pairing.
+        
         if kind == KIND_CALL {
             require!(
                 ctx.accounts.collateral_mint.key() == ctx.accounts.underlying.key(),
@@ -88,13 +89,6 @@ pub mod stocklana {
         }
         let pool = &mut ctx.accounts.pool;
         pool.authority = ctx.accounts.admin.key();
-        // ponytail: the keeper is fixed at init and there is no rotate
-        // instruction. Both operator keys belong to the same desk today, and the
-        // authority can always stand in for an unavailable keeper (see
-        // `Pool::is_operator`), so a compromised keeper key is contained by the
-        // fact that it can only latch the price the window already determines —
-        // it cannot choose one. Add `set_keeper`, authority-gated, the moment the
-        // keeper becomes a third party or a rotating hot key.
         pool.keeper = keeper;
         pool.kind = kind;
         pool.collateral_mint = ctx.accounts.collateral_mint.key();
@@ -133,74 +127,14 @@ pub mod stocklana {
         pool.epoch += 1;
         pool.epoch_end = epoch_end;
         pool.state = EpochState::Open;
-        // ponytail: the round counters live on `Pool` and are zeroed here rather
-        // than being derived by indexing `buy_option` logs. The epoch is the only
-        // thing they ever describe and `roll_epoch` is the one place an epoch
-        // begins, so a running total plus a reset is cheaper and more durable
-        // than a log scan. Move them onto the `EpochRecord` itself — created at
-        // roll instead of at close — if a round ever needs to be inspectable
-        // before its settlement price exists.
         pool.epoch_premium = 0;
         pool.epoch_collateral = 0;
         pool.epoch_positions = 0;
-        // ponytail: the round's opening share price is stamped at the roll, which
-        // is the last instant NAV is provably quiet: `open_positions == 0` was
-        // just required, so nothing is outstanding, and the deposits that follow
-        // all mint at this very number. Stamp it at the previous `close_epoch`
-        // instead only if LP flows ever stop being epoch-gated.
+
         pool.share_price_open = pool.share_price()?;
         Ok(())
     }
 
-    /// Latches the epoch settlement price: the median of every oracle sample
-    /// timestamped inside the 30 minutes ENDING at `epoch_end`. The window is
-    /// anchored on the boundary and never on `now`, so the print is a pure
-    /// function of `epoch_end` and the sample history — closing at T+2min and
-    /// closing at T+25min produce the identical number, and the operator's
-    /// choice of when to call this is worth nothing.
-    ///
-    /// ponytail: a Deribit-style trailing window rather than the last print or a
-    /// window centred on expiry. A genuine crash in the final minutes of an
-    /// epoch is not fully captured — the next daily epoch captures it — and that
-    /// is the accepted price for a number that is wick-resistant and provable
-    /// after the fact from the sample history alone. Widen `SETTLEMENT_WINDOW`,
-    /// or raise the push cadence behind it, if the underlying ever trades
-    /// thickly enough that 30 minutes of samples stops being representative.
-    ///
-    /// ponytail: keeper/authority-gated, replacing the permissionless close this
-    /// used to be. The owner wants settlement to be theirs, and the boundary
-    /// anchoring is what makes that safe to give them: a gated caller still
-    /// cannot choose the number, only whether it is latched at all. The cost is
-    /// liveness — if both the keeper and the authority key are lost the epoch
-    /// never closes, LP principal stays stuck behind the `open_positions` gate,
-    /// and only a program upgrade recovers it. Put the close back behind a
-    /// "keeper first, anyone after a grace period" rule if that liveness ever
-    /// matters more than the exclusivity.
-    ///
-    /// ponytail: no staleness check here, deliberately, unlike `buy_option`
-    /// which prices against a live median and must have one. Every sample this
-    /// reads is timestamped inside the window, which is strictly stronger
-    /// evidence of freshness than `last_update`, and demanding a recent push
-    /// would sabotage the recovery path below — the way a late keeper saves an
-    /// epoch is by NOT pushing.
-    ///
-    /// ponytail: the recovery path for "keeper was too late" is to stop pushing
-    /// and then close, and there is deliberately no escape hatch beyond it. The
-    /// ring rotates while the keeper waits: at one push a minute each minute of
-    /// delay evicts one in-window sample, `MIN_SETTLEMENT_SAMPLES` bites after
-    /// roughly 22 minutes and the window is gone entirely after 32, at which
-    /// point the inputs no longer exist on chain at all. Halting pushes freezes
-    /// the ring and preserves the window indefinitely, and the late close then
-    /// prints exactly what an on-time close would have. The alternatives were
-    /// weighed and rejected: an admin-set price hands the operator the
-    /// settlement number and defeats the entire design; falling back to the live
-    /// median re-introduces precisely the timing discretion this window removes;
-    /// widening the window on delay offers the operator a menu of two prints and
-    /// only ever reaches for samples OLDER than the window, which are the first
-    /// ones evicted, so it buys nothing. If the tail case ever does bite, the
-    /// upgrade is to void the round — write every position off at zero and
-    /// refund its premium, neutral between buyer and LP and inventing no price —
-    /// not to let anyone name a number.
     pub fn close_epoch(ctx: Context<CloseEpoch>) -> Result<()> {
         let clock = Clock::get()?;
         let pool = &mut ctx.accounts.pool;
@@ -215,24 +149,10 @@ pub mod stocklana {
         pool.settle_price = price;
         pool.state = EpochState::Closed;
 
-        // ponytail: the record is written once, at the close, and the four fields
-        // that cannot be known yet — `total_payout`, `positions_settled` and the
-        // closing share price — start at their pre-settlement values and are
-        // accumulated by `settle`/`force_settle` afterwards. The alternative,
-        // writing the record at the NEXT roll when everything has drained, gives
-        // a round with a stuck position no record at all, which is exactly the
-        // round whose settlement number most needs to be public. `positions_settled
-        // == positions_written` is the marker that the payout side is final; read
-        // the record without checking it and you are reading a round in progress.
         ctx.accounts.epoch_record.set_inner(EpochRecord {
             epoch: pool.epoch,
             epoch_end: pool.epoch_end,
             settle_price: price,
-            // ponytail: slot for the audit trail, `unix_timestamp` for anything
-            // contractual. The slot is exact and monotonic, the timestamp is a
-            // validator-vote estimate that drifts; expiry has to be a wall-clock
-            // promise to an option buyer, but "when was this latched" only ever
-            // needs to be orderable against other on-chain facts.
             settle_slot: clock.slot,
             settle_ts: clock.unix_timestamp,
             window_start,
@@ -270,18 +190,6 @@ pub mod stocklana {
         Ok(())
     }
 
-    /// ponytail: a 10% band around the ring median, and it is an ACCIDENT guard,
-    /// not a security control. It catches what actually goes wrong with a price
-    /// backend — a decimal slip, a unit mix-up, one bad tick lifted off a thin
-    /// book — and it catches it before the bad print can reach a settlement
-    /// window. It does NOT stop a compromised keeper: nothing rate-limits
-    /// pushes, so a stolen key walks the price wherever it likes in ~58 legal
-    /// 10% steps (0.9^58 is under 0.002 of spot) for the cost of the fees. The
-    /// mitigation for key compromise is a 2-of-3 or MPC keeper on the push
-    /// signature, not a tighter band here. Note the band cannot brick the oracle
-    /// either: a genuine market gap is traversed by pushing repeatedly, and every
-    /// accepted push refreshes `last_update`, so the staleness gate never closes
-    /// behind it.
     pub fn push_price(ctx: Context<PushPrice>, price: u64) -> Result<()> {
         require!(price > 0, StockError::BadPrice);
         let o = &mut ctx.accounts.oracle;
@@ -290,14 +198,12 @@ pub mod stocklana {
             require!(within_deviation(price, med), StockError::OracleDeviation);
         }
         let ts = Clock::get()?.unix_timestamp;
+        require!(
+            ts - o.last_update >= MIN_PUSH_INTERVAL,
+            StockError::PushTooSoon
+        );
         let i = o.idx as usize;
         o.samples[i] = price;
-        // ponytail: the sample timestamp is the on-chain clock at the moment the
-        // push lands, not a timestamp the keeper passes in. The keeper therefore
-        // chooses only WHEN to send, never what a sample claims about when it was
-        // taken, which is what lets `close_epoch` treat the window as evidence.
-        // Accept a signed observation time from the backend only if samples ever
-        // need to be batched or replayed, and verify the signature if so.
         o.sample_ts[i] = ts;
         o.idx = (o.idx + 1) % SAMPLES as u8;
         if (o.count as usize) < SAMPLES {
@@ -313,29 +219,12 @@ pub mod stocklana {
         Ok(())
     }
 
-    /// ponytail: LPs may only enter or exit while the pool carries no open
-    /// position, gated on `open_positions` rather than on `locked`. `locked` is a
-    /// proxy that lies — `required_collateral` floors to 0 for a dust-sized put,
-    /// so an open position can sit at `locked == 0` and let a depositor in ahead
-    /// of a payout. Holding the gate shut for the whole life of an epoch's
-    /// positions is what keeps the mint/redeem price fixed between boundaries:
-    /// premiums land in `available` at write time, so NAV does drift mid-epoch,
-    /// but no share can be minted or burned against the drifted number. Add a
-    /// pending-deposit queue credited at the next `close_epoch` if LPs ever need
-    /// to subscribe mid-epoch.
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, StockError::ZeroAmount);
         let pool = &mut ctx.accounts.pool;
         require!(pool.open_positions == 0, StockError::EpochActive);
         let assets = pool.assets()?;
         let shares = if pool.total_shares == 0 {
-            // ponytail: a floor on the genesis deposit instead of dead shares. A
-            // 1-unit first deposit mints 1 share and fixes a coarse scale that
-            // later depositors round dust against; one whole unit keeps the
-            // error below a cent at 6 decimals. Dead shares (mint a small pool
-            // share to the vault itself at init) are the upgrade path if the
-            // scale ever needs to be provably non-arbitrary rather than merely
-            // fine-grained.
             require!(amount >= MIN_FIRST_DEPOSIT, StockError::FirstDepositTooSmall);
             amount
         } else {
@@ -431,6 +320,11 @@ pub mod stocklana {
 
         let pool = &mut ctx.accounts.pool;
         let collateral = required_collateral(pool.kind, strike, size)?;
+        require!(collateral > 0, StockError::ZeroCollateral);
+        require!(
+            premium as u128 * BPS as u128 >= collateral as u128 * MIN_PREMIUM_BPS as u128,
+            StockError::PremiumTooSmall
+        );
         require!(collateral <= pool.available, StockError::InsufficientAvailable);
 
         token::transfer(
@@ -485,21 +379,6 @@ pub mod stocklana {
         Ok(())
     }
 
-    /// Pays a position out against the price its own epoch latched, not against
-    /// a live median, so every position written in an epoch settles at the same
-    /// print whoever calls this and whenever they call it.
-    ///
-    /// ponytail: keeper-or-authority gated, replacing the permissionless settle
-    /// this used to be, because the owner wants the whole settlement path to be
-    /// theirs and has accepted the liveness consequence. Nothing about the
-    /// payout is up to the caller — the price is latched, the payoff is a pure
-    /// function of it — so the gate buys exclusivity rather than safety, and it
-    /// costs the property that anyone could drain a stalled epoch. If both
-    /// operator keys are lost the counter never reaches zero, LP principal stays
-    /// behind the `open_positions` gate and only a program upgrade recovers it.
-    /// `force_settle` covers the merely-unavailable keeper; widen this back to
-    /// permissionless after a grace period if the lost-both-keys case ever needs
-    /// a remedy short of an upgrade.
     pub fn settle(ctx: Context<Settle>) -> Result<()> {
         let pool_key = ctx.accounts.pool.key();
         let position_key = ctx.accounts.position.key();
@@ -527,28 +406,7 @@ pub mod stocklana {
         Ok(())
     }
 
-    /// The authority's sweep for a position `settle` can no longer reach: a
-    /// straggler whose epoch the pool has already rolled past, or any position
-    /// at all while the keeper key is unavailable.
-    ///
-    /// ponytail: it settles at `epoch_record.settle_price` — the price the
-    /// position's OWN epoch latched, proven by the record's seeds — and there is
-    /// no price argument anywhere in the instruction. That is the whole point:
-    /// the authority can decide THAT a position is written off, never AT WHAT,
-    /// so the escape hatch cannot be turned into settlement discretion. It is
-    /// strictly more correct than reaching for `pool.settle_price`, which by the
-    /// time a straggler shows up belongs to a different round. It cannot run at
-    /// all before the epoch closes, because the record it reads does not exist
-    /// until then. Give it a `voided` branch that refunds premium instead if the
-    /// round-cannot-close case in `close_epoch` ever needs a remedy.
-    ///
-    /// ponytail: no `pool.state` gate, unlike `settle`, and the asymmetry is the
-    /// point. A straggler is swept long after its own round ended, by which time
-    /// the pool is usually `Open` on a later epoch — gating on the pool's current
-    /// state would lock out exactly the position this instruction exists for. The
-    /// record's existence already proves the position's own epoch closed, and its
-    /// seeds prove the record belongs to that epoch. Add a state gate only if a
-    /// sweep ever needs to be sequenced against the live round.
+
     pub fn force_settle(ctx: Context<ForceSettle>) -> Result<()> {
         let pool_key = ctx.accounts.pool.key();
         let position_key = ctx.accounts.position.key();
@@ -694,15 +552,7 @@ fn within_deviation(price: u64, med: u64) -> bool {
     (price.abs_diff(med) as u128) * (BPS as u128) <= (med as u128) * (MAX_DEV_BPS as u128)
 }
 
-/// Upper median of `buf[..n]`, sorted in place. `None` when `n == 0`.
-///
-/// ponytail: a fixed `[u64; SAMPLES]` stack buffer rather than the `to_vec()`
-/// this used to do. `buy_option` calls it on the hot path and `push_price` now
-/// calls it on every single push, and a 32-slot copy is 256 bytes of frame
-/// against a heap allocation the BPF allocator can never give back. The frame is
-/// the constraint if `SAMPLES` ever grows: past a few hundred samples this stops
-/// fitting comfortably in the 4KB stack and wants a selection algorithm over the
-/// account data instead of a copy-and-sort.
+
 fn median_of(buf: &mut [u64; SAMPLES], n: usize) -> Option<u64> {
     if n == 0 {
         return None;
@@ -728,6 +578,8 @@ fn ring_median(o: &Oracle) -> Option<u64> {
 fn window_median(o: &Oracle, start: i64, end: i64) -> Result<(u64, u8)> {
     let mut buf = [0u64; SAMPLES];
     let mut n = 0usize;
+    let mut oldest = i64::MAX;
+    let mut newest = i64::MIN;
     for (&price, &ts) in o
         .samples
         .iter()
@@ -737,11 +589,17 @@ fn window_median(o: &Oracle, start: i64, end: i64) -> Result<(u64, u8)> {
         if (start..=end).contains(&ts) {
             buf[n] = price;
             n += 1;
+            oldest = oldest.min(ts);
+            newest = newest.max(ts);
         }
     }
     require!(
         n >= MIN_SETTLEMENT_SAMPLES,
         StockError::InsufficientSamples
+    );
+    require!(
+        newest - oldest >= MIN_SETTLEMENT_SPAN,
+        StockError::SettlementWindowTooShort
     );
     let price = median_of(&mut buf, n).ok_or(StockError::NoSamples)?;
     Ok((price, n as u8))
@@ -1255,6 +1113,14 @@ pub enum StockError {
     EpochNotStarted,
     #[msg("epoch has run out of time for new options")]
     EpochExpired,
+    #[msg("oracle pushed again too soon after the last sample")]
+    PushTooSoon,
+    #[msg("settlement window samples do not span enough time")]
+    SettlementWindowTooShort,
+    #[msg("premium is too small relative to the position collateral")]
+    PremiumTooSmall,
+    #[msg("position requires zero collateral")]
+    ZeroCollateral,
 }
 
 #[cfg(test)]
@@ -1327,17 +1193,17 @@ mod tests {
 
     #[test]
     fn settlement_window_ignores_samples_outside_it() {
-        let mut s: Vec<(u64, i64)> = (0..12).map(|i| (200 * S, 1_000 + i)).collect();
+        let mut s: Vec<(u64, i64)> = (0..12).map(|i| (200 * S, 1_000 + i * 100)).collect();
         s.extend((0..12).map(|i| (300 * S, 9_000 + i)));
-        let (price, n) = window_median(&oracle_with(&s), 900, 1_100).unwrap();
+        let (price, n) = window_median(&oracle_with(&s), 900, 2_100).unwrap();
         assert_eq!(price, 200 * S, "post-window prints must not settle the epoch");
         assert_eq!(n, 12);
     }
 
     #[test]
     fn settlement_window_is_boundary_anchored_not_call_anchored() {
-        let end = 1_020;
-        let on_time: Vec<(u64, i64)> = (0..12).map(|i| (200 * S, 1_000 + i)).collect();
+        let end = 1_900;
+        let on_time: Vec<(u64, i64)> = (0..12).map(|i| (200 * S, 1_000 + i * 100)).collect();
         // the operator stalls instead, and the feed keeps running past the
         // boundary while it does: the extra history must be worth nothing
         let mut stalled = on_time.clone();
@@ -1357,10 +1223,19 @@ mod tests {
     }
 
     #[test]
+    fn settlement_refuses_a_window_that_does_not_span_time() {
+        let mut s: Vec<(u64, i64)> = (0..12).map(|i| (200 * S, 1_000 + i * 100)).collect();
+        s.extend((0..12).map(|i| (300 * S, 1_016 + i)));
+        // the 200s span 220s but the 300s land in a 12-second burst; the window
+        // must see through the stuffing and span the full in-window range
+        assert!(window_median(&oracle_with(&s), 1_000, 1_100).is_err());
+    }
+
+    #[test]
     fn a_single_wick_does_not_move_the_median() {
-        let mut s: Vec<(u64, i64)> = (0..15).map(|i| (200 * S, 1_000 + i)).collect();
+        let mut s: Vec<(u64, i64)> = (0..15).map(|i| (200 * S, 1_000 + i * 70)).collect();
         s.push((500 * S, 1_016));
-        let (price, _) = window_median(&oracle_with(&s), 900, 1_100).unwrap();
+        let (price, _) = window_median(&oracle_with(&s), 900, 2_100).unwrap();
         assert_eq!(price, 200 * S);
     }
 }
