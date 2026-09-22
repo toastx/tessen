@@ -1,0 +1,25 @@
+[package]
+name = "stocklana-backend"
+version = "0.1.0"
+edition = "2021"
+
+# Detached from the on-chain workspace (same reason as keeper/): keep the
+# program's fragile build and lockfile untouched.
+[workspace]
+
+[[bin]]
+name = "backend"
+path = "src/main.rs"
+
+[dependencies]
+stocklana = { path = "../programs/stocklana", features = ["no-entrypoint"] }
+anchor-lang = "0.32.2"
+solana-client = "2.3"
+solana-sdk = "2.3"
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+base64 = "0.22"
