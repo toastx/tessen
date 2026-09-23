@@ -1,5 +1,4 @@
-import { Buffer } from "buffer";
-window.Buffer ??= Buffer; // anchor/web3 expect it in the browser
+import "./polyfill"; // must stay first — see the comment in polyfill.js
 
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";

@@ -50,3 +50,16 @@ export function medianOf(samples, count) {
   const buf = samples.slice(0, count).map(Number).sort((a, b) => a - b);
   return buf[Math.floor(count / 2)];
 }
+
+/**
+ * A ladder of strike prices around spot, on a tick the price justifies.
+ * Rounding to a tick can collapse two factors onto the same strike (at spot
+ * 200, 0.94 and 0.96 both land on 190), so the result is deduped — callers
+ * key React lists by the strike itself.
+ */
+export function strikeLadder(spotUi, factors = [0.9, 0.95, 1.0, 1.05]) {
+  if (!spotUi) return [];
+  const tick = spotUi >= 100 ? 5 : spotUi >= 20 ? 1 : 0.5;
+  const ticks = factors.map(f => Math.round((spotUi * f) / tick) * tick);
+  return [...new Set(ticks)].filter(v => v > 0).sort((a, b) => a - b);
+}

@@ -3,7 +3,7 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { quote as quoteApi } from "./api";
 import { buyOption, claim, deposit, newPositionId, withdraw } from "./chain";
-import { clock, dur, num, raw, SCALE, short, ui, usd } from "./format";
+import { clock, dur, num, raw, SCALE, short, strikeLadder, ui, usd } from "./format";
 
 const TICKER = import.meta.env.VITE_TICKER || null;
 const ticker = oracle => TICKER || (oracle ? short(oracle.underlying) : "underlying");
@@ -71,7 +71,7 @@ export function Dashboard({ pool, epochs, epoch, nav, spot, oracle, setTab, publ
   const navLine = pts.map((p, i) => (i ? "L" : "M") + p[0].toFixed(1) + "," + p[1].toFixed(1)).join(" ");
   const navDelta = series.length > 1 ? ((series[series.length - 1] / series[0] - 1) * 100).toFixed(2) : null;
 
-  const presets = spot ? [0.94, 0.96, 0.98, 1.0].map(f => Math.round((ui(spot) * f) / 5) * 5) : [];
+  const presets = strikeLadder(ui(spot));
   const goTrade = strike => () => { sessionStorage.setItem("stocklana.strike", strike.toFixed(2)); setTab("trade"); };
 
   return (
@@ -271,7 +271,7 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
   };
 
   const edge = err ? "var(--color-accent-700)" : q && !expired ? "var(--color-accent-700)" : "var(--color-neutral-800)";
-  const presets = spot ? [0.9, 0.95, 1.0, 1.05].map(f => Math.round(ui(spot) * f / 5) * 5) : [];
+  const presets = strikeLadder(ui(spot));
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1.05fr", gap: 14, alignItems: "start" }}>

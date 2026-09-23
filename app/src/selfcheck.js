@@ -1,7 +1,7 @@
 // The money math, checked against the program's own conventions.
 // Run: npm test  (from app/)
 import assert from "node:assert/strict";
-import { SCALE, medianOf, payoff, raw, sharePrice, ui, usd, num, dur, short } from "./format.js";
+import { SCALE, medianOf, payoff, raw, sharePrice, strikeLadder, ui, usd, num, dur, short } from "./format.js";
 
 // 1e6 scale round-trips, and `raw` refuses what would silently corrupt an amount
 assert.equal(raw(200), 200_000_000);
@@ -47,4 +47,19 @@ assert.equal(dur(3661), "01h 01m 01s");
 assert.equal(short("9Fq2abcdefgh8mTa"), "9Fq2…8mTa");
 assert.equal(short(null), "—");
 
-console.log("ok — scale, share price, payoff, median and formatting");
+// strike ladders are deduped — they key React lists, and rounding to a tick
+// collapses nearby factors (spot 200: 0.94 and 0.96 both land on 190)
+for (const spot of [0.4, 3, 21, 99.99, 200, 214.37, 1850]) {
+  for (const factors of [[0.9, 0.95, 1, 1.05], [0.94, 0.96, 0.98, 1], [1, 1, 1]]) {
+    const l = strikeLadder(spot, factors);
+    assert.equal(new Set(l).size, l.length, `duplicate strike at spot ${spot}: ${l}`);
+    assert.ok(l.every(v => v > 0), `non-positive strike at spot ${spot}: ${l}`);
+    assert.deepEqual(l, l.slice().sort((a, b) => a - b), "ladder not ascending");
+  }
+}
+assert.deepEqual(strikeLadder(200), [180, 190, 200, 210]);
+assert.deepEqual(strikeLadder(200, [0.94, 0.96, 0.98, 1]), [190, 195, 200]); // 0.94/0.96 collapse
+assert.deepEqual(strikeLadder(0), []);
+assert.deepEqual(strikeLadder(null), []);
+
+console.log("ok — scale, share price, payoff, median, strike ladder and formatting");
