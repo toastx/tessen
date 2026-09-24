@@ -1,7 +1,7 @@
 // The money math, checked against the program's own conventions.
 // Run: npm test  (from app/)
 import assert from "node:assert/strict";
-import { SCALE, medianOf, payoff, raw, sharePrice, strikeLadder, ui, usd, num, dur, short } from "./format.js";
+import { SCALE, depositRaw, medianOf, payoff, raw, sharePrice, strikeLadder, ui, usd, num, dur, short } from "./format.js";
 
 // 1e6 scale round-trips, and `raw` refuses what would silently corrupt an amount
 assert.equal(raw(200), 200_000_000);
@@ -62,4 +62,18 @@ assert.deepEqual(strikeLadder(200, [0.94, 0.96, 0.98, 1]), [190, 195, 200]); // 
 assert.deepEqual(strikeLadder(0), []);
 assert.deepEqual(strikeLadder(null), []);
 
-console.log("ok — scale, share price, payoff, median, strike ladder and formatting");
+// MAX deposits the exact balance and never a unit more — the round trip
+// raw -> ui -> raw is what a MAX click does, and it must not overshoot
+for (const bal of [1, 1_000_000, 500_004_200_000, 999_999_999_999, 123_456_789]) {
+  const typed = ui(bal);                       // what MAX puts in the box
+  assert.ok(depositRaw(typed, bal) <= bal, `MAX overshot at balance ${bal}`);
+  assert.equal(depositRaw(typed, bal), bal, `MAX undershot at balance ${bal}`);
+}
+// typing more than you hold is clamped, typing less is untouched
+assert.equal(depositRaw(999, 1_000_000), 1_000_000);
+assert.equal(depositRaw(0.5, 1_000_000), 500_000);
+// unknown balance (no wallet) falls through to the typed amount
+assert.equal(depositRaw(25, null), 25_000_000);
+assert.throws(() => depositRaw(-5, null), /positive/);
+
+console.log("ok — scale, share price, payoff, median, strike ladder, max deposit and formatting");

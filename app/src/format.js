@@ -63,3 +63,12 @@ export function strikeLadder(spotUi, factors = [0.9, 0.95, 1.0, 1.05]) {
   const ticks = factors.map(f => Math.round((spotUi * f) / tick) * tick);
   return [...new Set(ticks)].filter(v => v > 0).sort((a, b) => a - b);
 }
+
+/**
+ * Raw amount to actually deposit for a typed UI amount, never more than the
+ * wallet holds. Clicking MAX round-trips the balance through a float
+ * (raw -> ui -> raw), which can land a unit above the true balance on large
+ * balances and fail the transfer for a rounding error — so clamp.
+ */
+export const depositRaw = (amount, balanceRaw) =>
+  balanceRaw == null ? raw(amount) : Math.min(raw(amount), balanceRaw);

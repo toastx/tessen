@@ -3,7 +3,7 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { quote as quoteApi } from "./api";
 import { buyOption, claim, deposit, newPositionId, withdraw } from "./chain";
-import { clock, dur, num, raw, SCALE, short, strikeLadder, ui, usd } from "./format";
+import { clock, depositRaw, dur, num, raw, SCALE, short, strikeLadder, ui, usd } from "./format";
 
 const TICKER = import.meta.env.VITE_TICKER || null;
 const ticker = oracle => TICKER || (oracle ? short(oracle.underlying) : "underlying");
@@ -428,14 +428,20 @@ export function Liquidity({ pool, nav, program, publicKey, shares, balance, sett
           <p style={{ fontSize: 13, color: "var(--color-neutral-500)", margin: "0 0 18px" }}>Mint shares at the current NAV. First deposit must be at least 1 USDC.</p>
           <div className="field" style={{ marginBottom: 14 }}>
             <label htmlFor="dep">Amount (USDC)</label>
-            <input id="dep" className="input mono" inputMode="decimal" value={amt} placeholder="0.00"
-              onChange={e => setAmt(e.target.value)} disabled={gated} />
-            {balance != null && (
-              <div className="mono" style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--color-neutral-600)", marginTop: 6 }}>
-                <span>wallet {usd(ui(balance))}</span>
-                <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={() => setAmt(String(ui(balance)))}>max</button>
-              </div>
-            )}
+            <div style={{ position: "relative" }}>
+              <input id="dep" className="input mono" inputMode="decimal" value={amt} placeholder="0.00"
+                onChange={e => setAmt(e.target.value)} disabled={gated} style={{ paddingRight: 60 }} />
+              <button className="btn btn-ghost" onClick={() => setAmt(String(ui(balance)))}
+                disabled={gated || !balance}
+                title={balance ? `Deposit your full balance, ${usd(ui(balance))}` : "Connect a wallet with USDC"}
+                style={{ position: "absolute", right: 5, top: "50%", transform: "translateY(-50%)", fontSize: 11, letterSpacing: "0.06em", padding: "3px 9px", borderRadius: "var(--radius-sm)" }}>
+                MAX
+              </button>
+            </div>
+            <div className="mono" style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 11, marginTop: 6, color: "var(--color-neutral-600)" }}>
+              <span>wallet {balance == null ? "—" : usd(ui(balance))}</span>
+              {overBalance && <span style={{ color: "var(--color-accent-400)" }}>more than you hold</span>}
+            </div>
           </div>
           <Row label="Shares received" value={num(depShares, 4)} />
           <Row label="At NAV" value={nav.toFixed(6)} />
@@ -445,7 +451,7 @@ export function Liquidity({ pool, nav, program, publicKey, shares, balance, sett
           <button className="btn btn-primary btn-block" style={{ height: 40, marginTop: 16 }}
             disabled={gated || busy || dep <= 0 || overBalance}
             onClick={() => run(() => `Deposited ${usd(dep)} · ${num(depShares, 4)} shares minted`,
-              () => deposit(program, pool, raw(dep)))}>
+              () => deposit(program, pool, depositRaw(dep, balance)))}>
             {overBalance ? "Exceeds wallet balance" : busy ? "Submitting…" : "Deposit USDC"}
           </button>
         </Panel>
