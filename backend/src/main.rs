@@ -442,14 +442,22 @@ async fn main() -> Res<()> {
         tx,
     };
 
-    let pool_count = index_once(&state).await?;
-    if pool_count == 0 {
-        return Err(format!(
-            "no pools found for program {} at {rpc_url}",
-            state.cfg.program_id
-        )
-        .into());
-    }
+    // Never fatal: the background indexer retries, and a server that refuses to
+    // bind because the RPC blipped is a 502 with no way to see why.
+    let pool_count = match index_once(&state).await {
+        Ok(0) => {
+            eprintln!(
+                "index warning: no compatible pools found for program {} at {rpc_url}",
+                state.cfg.program_id
+            );
+            0
+        }
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("index warning: initial index failed against {rpc_url}: {e}");
+            0
+        }
+    };
     tokio::spawn(indexer(state.clone()));
 
     let app = Router::new()

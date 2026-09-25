@@ -23,6 +23,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
+    libudev1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/keeper/target/release/tessen-keeper /usr/local/bin/server

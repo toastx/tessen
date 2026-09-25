@@ -2,8 +2,11 @@
 // websocket pushes every change, so polling is only the reconnect fallback.
 import { useCallback, useEffect, useRef, useState } from "react";
 
+const BACKEND_URL = (import.meta.env.VITE_BACKEND_URL ||
+  "https://backend.tessen.xyz").replace(/\/$/, "");
+
 const j = async (path, init) => {
-  const r = await fetch("/api" + path, init);
+  const r = await fetch(BACKEND_URL + path, init);
   const body = await r.text();
   if (!r.ok) throw Object.assign(new Error(body || r.statusText), { status: r.status });
   return body ? JSON.parse(body) : null;
@@ -59,7 +62,9 @@ export function useBackend(owner) {
 
   // live updates; the poll is what covers a dropped socket
   useEffect(() => {
-    const url = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+    const url = BACKEND_URL.startsWith("/")
+      ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
+      : BACKEND_URL.replace(/^http/, "ws") + "/ws";
     let ws, closed = false;
     const open = () => {
       ws = new WebSocket(url);
