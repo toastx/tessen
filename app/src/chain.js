@@ -6,9 +6,8 @@ import { AnchorProvider, BN, Program } from "@coral-xyz/anchor";
 import { useConnection, useAnchorWallet } from "@solana/wallet-adapter-react";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PublicKey, Transaction } from "@solana/web3.js";
-// straight from anchor's output — a copied IDL goes stale the moment an
-// accounts struct changes, and the failure is a confusing account error
-import idl from "../../target/idl/tessen.json";
+// Vendored from target/idl/tessen.json so frontend-only deployments include it.
+import idl from "./idl/tessen.json";
 import { buildBuy } from "./api";
 import { medianOf } from "./format";
 

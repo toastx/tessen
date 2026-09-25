@@ -1,0 +1,1647 @@
+{
+  "address": "548P3sxkEEeE1L935jh4y7Tcosp5zUjCeR7Nn7NL1MHr",
+  "metadata": {
+    "name": "tessen",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Cash-secured option vaults"
+  },
+  "instructions": [
+    {
+      "name": "buy_option",
+      "docs": [
+        "Quote validity comes from the backend co-signing the transaction.",
+        "ponytail: admin-signer quotes; move to ed25519 sysvar verification if quotes get relayed."
+      ],
+      "discriminator": [
+        242,
+        253,
+        221,
+        183,
+        67,
+        244,
+        140,
+        119
+      ],
+      "accounts": [
+        {
+          "name": "buyer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "quote_signer",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true
+        },
+        {
+          "name": "oracle",
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "buyer_token",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  112,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "buyer"
+              },
+              {
+                "kind": "arg",
+                "path": "id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "id",
+          "type": "u64"
+        },
+        {
+          "name": "strike",
+          "type": "u64"
+        },
+        {
+          "name": "size",
+          "type": "u64"
+        },
+        {
+          "name": "premium",
+          "type": "u64"
+        },
+        {
+          "name": "quote_expiry",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "claim",
+      "docs": [
+        "Deliberately epoch-agnostic: `payout` is computed and frozen at settle",
+        "time, `settled` is single-shot, and `has_one = pool` already binds the",
+        "position to the vault that holds its money. An epoch check here (e.g.",
+        "`position.epoch == pool.epoch`) would permanently strand a",
+        "settled-but-unclaimed position the moment the pool rolled on: by the time",
+        "the buyer came back, `pool.epoch` would have moved on and the claim could",
+        "never succeed. Payouts must survive a roll, so this stays as",
+        "is."
+      ],
+      "discriminator": [
+        62,
+        198,
+        214,
+        193,
+        213,
+        159,
+        108,
+        210
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "position"
+          ]
+        },
+        {
+          "name": "pool",
+          "relations": [
+            "position"
+          ]
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "owner_token",
+          "writable": true
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_epoch",
+      "discriminator": [
+        13,
+        87,
+        7,
+        133,
+        109,
+        14,
+        83,
+        25
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true
+        },
+        {
+          "name": "oracle",
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "epoch_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  112,
+                  111,
+                  99,
+                  104
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "pool.epoch",
+                "account": "Pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "deposit",
+      "discriminator": [
+        242,
+        35,
+        198,
+        137,
+        82,
+        225,
+        242,
+        182
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "user_token",
+          "writable": true
+        },
+        {
+          "name": "lp",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "force_settle",
+      "discriminator": [
+        201,
+        10,
+        239,
+        245,
+        47,
+        198,
+        225,
+        204
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "relations": [
+            "position"
+          ]
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "epoch_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  112,
+                  111,
+                  99,
+                  104
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "position.epoch",
+                "account": "OptionPosition"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "init_oracle",
+      "discriminator": [
+        78,
+        100,
+        33,
+        183,
+        96,
+        207,
+        60,
+        91
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "underlying"
+        },
+        {
+          "name": "oracle",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  114,
+                  97,
+                  99,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "underlying"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "keeper",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "init_pool",
+      "discriminator": [
+        116,
+        233,
+        199,
+        204,
+        115,
+        159,
+        171,
+        36
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "collateral_mint"
+        },
+        {
+          "name": "underlying",
+          "docs": [
+            "The asset the strikes refer to. Passed explicitly rather than inferred",
+            "from the collateral mint so the admin has to name the preStock this pool",
+            "prices, instead of a wrong oracle silently agreeing with a wrong mint."
+          ]
+        },
+        {
+          "name": "oracle"
+        },
+        {
+          "name": "pool",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "kind",
+          "type": "u8"
+        },
+        {
+          "name": "pool_name",
+          "type": "string"
+        },
+        {
+          "name": "quote_signer",
+          "type": "pubkey"
+        },
+        {
+          "name": "keeper",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "push_price",
+      "discriminator": [
+        113,
+        238,
+        232,
+        235,
+        60,
+        71,
+        127,
+        203
+      ],
+      "accounts": [
+        {
+          "name": "oracle",
+          "writable": true
+        },
+        {
+          "name": "keeper",
+          "signer": true,
+          "relations": [
+            "oracle"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "price",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "roll_epoch",
+      "docs": [
+        "Opens the next epoch. Every option written in it expires at `epoch_end`,",
+        "so NAV can only move at a boundary. Keeper passes now+86400 for daily."
+      ],
+      "discriminator": [
+        17,
+        54,
+        176,
+        59,
+        34,
+        11,
+        253,
+        90
+      ],
+      "accounts": [
+        {
+          "name": "pool",
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "pool"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "epoch_end",
+          "type": "i64"
+        }
+      ]
+    },
+    {
+      "name": "settle",
+      "discriminator": [
+        175,
+        42,
+        185,
+        87,
+        144,
+        131,
+        102,
+        212
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true,
+          "relations": [
+            "position"
+          ]
+        },
+        {
+          "name": "position",
+          "writable": true
+        },
+        {
+          "name": "epoch_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  112,
+                  111,
+                  99,
+                  104
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "position.epoch",
+                "account": "OptionPosition"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "withdraw",
+      "discriminator": [
+        183,
+        18,
+        70,
+        156,
+        148,
+        109,
+        161,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "signer": true
+        },
+        {
+          "name": "pool",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "relations": [
+            "pool"
+          ]
+        },
+        {
+          "name": "user_token",
+          "writable": true
+        },
+        {
+          "name": "lp",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pool"
+              },
+              {
+                "kind": "account",
+                "path": "user"
+              }
+            ]
+          }
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "shares",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "EpochRecord",
+      "discriminator": [
+        193,
+        72,
+        26,
+        28,
+        161,
+        98,
+        58,
+        132
+      ]
+    },
+    {
+      "name": "LpPosition",
+      "discriminator": [
+        105,
+        241,
+        37,
+        200,
+        224,
+        2,
+        252,
+        90
+      ]
+    },
+    {
+      "name": "OptionPosition",
+      "discriminator": [
+        212,
+        247,
+        167,
+        73,
+        56,
+        224,
+        204,
+        102
+      ]
+    },
+    {
+      "name": "Oracle",
+      "discriminator": [
+        139,
+        194,
+        131,
+        179,
+        140,
+        179,
+        229,
+        244
+      ]
+    },
+    {
+      "name": "Pool",
+      "discriminator": [
+        241,
+        154,
+        109,
+        4,
+        17,
+        177,
+        109,
+        188
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "BuyOptionEvent",
+      "discriminator": [
+        196,
+        69,
+        116,
+        50,
+        112,
+        101,
+        136,
+        112
+      ]
+    },
+    {
+      "name": "ClaimEvent",
+      "discriminator": [
+        93,
+        15,
+        70,
+        170,
+        48,
+        140,
+        212,
+        219
+      ]
+    },
+    {
+      "name": "CloseEpochEvent",
+      "discriminator": [
+        133,
+        137,
+        216,
+        15,
+        90,
+        158,
+        22,
+        248
+      ]
+    },
+    {
+      "name": "DepositEvent",
+      "discriminator": [
+        120,
+        248,
+        61,
+        83,
+        31,
+        142,
+        107,
+        144
+      ]
+    },
+    {
+      "name": "ForceSettleEvent",
+      "discriminator": [
+        224,
+        21,
+        116,
+        60,
+        83,
+        166,
+        143,
+        198
+      ]
+    },
+    {
+      "name": "PushPriceEvent",
+      "discriminator": [
+        88,
+        64,
+        54,
+        218,
+        148,
+        36,
+        228,
+        187
+      ]
+    },
+    {
+      "name": "SettleEvent",
+      "discriminator": [
+        14,
+        166,
+        206,
+        248,
+        35,
+        1,
+        134,
+        48
+      ]
+    },
+    {
+      "name": "WithdrawEvent",
+      "discriminator": [
+        22,
+        9,
+        133,
+        26,
+        160,
+        44,
+        71,
+        192
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "MathOverflow",
+      "msg": "math overflow"
+    },
+    {
+      "code": 6001,
+      "name": "ZeroAmount",
+      "msg": "amount must be non-zero"
+    },
+    {
+      "code": 6002,
+      "name": "InsufficientAvailable",
+      "msg": "not enough available collateral"
+    },
+    {
+      "code": 6003,
+      "name": "NotKeeper",
+      "msg": "signer is not the oracle keeper"
+    },
+    {
+      "code": 6004,
+      "name": "QuoteExpired",
+      "msg": "quote expired"
+    },
+    {
+      "code": 6005,
+      "name": "BadQuoteSigner",
+      "msg": "bad quote signer"
+    },
+    {
+      "code": 6006,
+      "name": "PremiumBelowIntrinsic",
+      "msg": "premium is below the option intrinsic value"
+    },
+    {
+      "code": 6007,
+      "name": "EpochActive",
+      "msg": "epoch has open positions"
+    },
+    {
+      "code": 6008,
+      "name": "EpochClosed",
+      "msg": "epoch is closed for new options"
+    },
+    {
+      "code": 6009,
+      "name": "BadExpiry",
+      "msg": "expiry must be in the future"
+    },
+    {
+      "code": 6010,
+      "name": "NotExpired",
+      "msg": "option has not expired"
+    },
+    {
+      "code": 6011,
+      "name": "AlreadySettled",
+      "msg": "already settled"
+    },
+    {
+      "code": 6012,
+      "name": "NotSettled",
+      "msg": "not settled"
+    },
+    {
+      "code": 6013,
+      "name": "NoSamples",
+      "msg": "oracle has no samples"
+    },
+    {
+      "code": 6014,
+      "name": "BadKind",
+      "msg": "bad option kind"
+    },
+    {
+      "code": 6015,
+      "name": "BadPoolName",
+      "msg": "pool name must contain 1 to 32 UTF-8 bytes"
+    },
+    {
+      "code": 6016,
+      "name": "BadPrice",
+      "msg": "bad price"
+    },
+    {
+      "code": 6017,
+      "name": "NotOwner",
+      "msg": "not the owner"
+    },
+    {
+      "code": 6018,
+      "name": "StaleOracle",
+      "msg": "oracle samples are stale"
+    },
+    {
+      "code": 6019,
+      "name": "QuoteTtlTooLong",
+      "msg": "quote expiry is too far in the future"
+    },
+    {
+      "code": 6020,
+      "name": "OracleMintMismatch",
+      "msg": "oracle underlying does not match the pool collateral mint"
+    },
+    {
+      "code": 6021,
+      "name": "EpochMismatch",
+      "msg": "position belongs to a different epoch"
+    },
+    {
+      "code": 6022,
+      "name": "EpochNotClosed",
+      "msg": "epoch has not been closed"
+    },
+    {
+      "code": 6023,
+      "name": "EpochAlreadyClosed",
+      "msg": "epoch settlement price is already latched"
+    },
+    {
+      "code": 6024,
+      "name": "EpochNotEnded",
+      "msg": "epoch has not reached its end"
+    },
+    {
+      "code": 6025,
+      "name": "FirstDepositTooSmall",
+      "msg": "first deposit must be at least one whole unit"
+    },
+    {
+      "code": 6026,
+      "name": "OracleDeviation",
+      "msg": "price deviates too far from the oracle median"
+    },
+    {
+      "code": 6027,
+      "name": "InsufficientSamples",
+      "msg": "too few oracle samples in the settlement window"
+    },
+    {
+      "code": 6028,
+      "name": "NotAuthority",
+      "msg": "signer is not the pool authority"
+    },
+    {
+      "code": 6029,
+      "name": "EpochNotStarted",
+      "msg": "pool has not opened an epoch yet"
+    },
+    {
+      "code": 6030,
+      "name": "EpochExpired",
+      "msg": "epoch has run out of time for new options"
+    },
+    {
+      "code": 6031,
+      "name": "PushTooSoon",
+      "msg": "oracle pushed again too soon after the last sample"
+    },
+    {
+      "code": 6032,
+      "name": "SettlementWindowTooShort",
+      "msg": "settlement window samples do not span enough time"
+    },
+    {
+      "code": 6033,
+      "name": "PremiumTooSmall",
+      "msg": "premium is too small relative to the position collateral"
+    },
+    {
+      "code": 6034,
+      "name": "ZeroCollateral",
+      "msg": "position requires zero collateral"
+    }
+  ],
+  "types": [
+    {
+      "name": "BuyOptionEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "id",
+            "type": "u64"
+          },
+          {
+            "name": "strike",
+            "type": "u64"
+          },
+          {
+            "name": "size",
+            "type": "u64"
+          },
+          {
+            "name": "premium",
+            "type": "u64"
+          },
+          {
+            "name": "collateral",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ClaimEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CloseEpochEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "settle_price",
+            "type": "u64"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          },
+          {
+            "name": "sample_count",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DepositEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EpochRecord",
+      "docs": [
+        "Permanent, per-round proof of what settlement actually did. `Pool.settle_price`",
+        "is overwritten by the next close and transaction logs get pruned by RPCs, so",
+        "account state is the only durable place a user can be shown the number their",
+        "option paid out against."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "epoch_end",
+            "type": "i64"
+          },
+          {
+            "name": "settle_price",
+            "type": "u64"
+          },
+          {
+            "name": "settle_slot",
+            "type": "u64"
+          },
+          {
+            "name": "settle_ts",
+            "type": "i64"
+          },
+          {
+            "name": "window_start",
+            "type": "i64"
+          },
+          {
+            "name": "window_end",
+            "type": "i64"
+          },
+          {
+            "name": "sample_count",
+            "docs": [
+              "How many in-window samples produced `settle_price`. A thin or degraded",
+              "settlement is visible here after the fact instead of being silent."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "total_premium",
+            "type": "u64"
+          },
+          {
+            "name": "total_collateral",
+            "type": "u64"
+          },
+          {
+            "name": "total_payout",
+            "docs": [
+              "Final only once `positions_settled == positions_written`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "positions_written",
+            "type": "u32"
+          },
+          {
+            "name": "positions_settled",
+            "type": "u32"
+          },
+          {
+            "name": "share_price_open",
+            "type": "u64"
+          },
+          {
+            "name": "share_price_close",
+            "docs": [
+              "Rewritten by every settle; the round's true close is the value it holds",
+              "once `positions_settled == positions_written`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EpochState",
+      "docs": [
+        "Where the pool is in the epoch cycle. `Genesis` is a pool that has never",
+        "opened an epoch, and it is a state in its own right rather than epoch 0",
+        "dressed up as a round that settled at a price of zero.",
+        "",
+        "ponytail: three states, with no `Paused` and no `Voided`. The transitions are",
+        "a closed cycle — `Genesis | Closed -> Open -> Closed` — and every instruction",
+        "is reachable from exactly one of them, so a fourth variant would today buy",
+        "nothing but unreachable code. `Voided` is the variant to add if the",
+        "round-cannot-close tail case described in `close_epoch` ever needs the remedy",
+        "that ponytail names: it wants a round that is finished without ever having",
+        "had a price, which is precisely what none of these three can express."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Genesis"
+          },
+          {
+            "name": "Open"
+          },
+          {
+            "name": "Closed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ForceSettleEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "LpPosition",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OptionPosition",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "id",
+            "type": "u64"
+          },
+          {
+            "name": "strike",
+            "type": "u64"
+          },
+          {
+            "name": "size",
+            "type": "u64"
+          },
+          {
+            "name": "expiry",
+            "type": "i64"
+          },
+          {
+            "name": "epoch",
+            "docs": [
+              "The epoch this was written in; `settle` only accepts the price latched",
+              "for exactly this epoch."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "collateral",
+            "type": "u64"
+          },
+          {
+            "name": "premium",
+            "type": "u64"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          },
+          {
+            "name": "kind",
+            "type": "u8"
+          },
+          {
+            "name": "settled",
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Oracle",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "keeper",
+            "type": "pubkey"
+          },
+          {
+            "name": "underlying",
+            "type": "pubkey"
+          },
+          {
+            "name": "samples",
+            "type": {
+              "array": [
+                "u64",
+                32
+              ]
+            }
+          },
+          {
+            "name": "sample_ts",
+            "docs": [
+              "On-chain clock at the moment each sample landed, parallel to `samples`.",
+              "This is what makes a settlement window provable rather than assumed."
+            ],
+            "type": {
+              "array": [
+                "i64",
+                32
+              ]
+            }
+          },
+          {
+            "name": "last_update",
+            "type": "i64"
+          },
+          {
+            "name": "count",
+            "type": "u8"
+          },
+          {
+            "name": "idx",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Pool",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "keeper",
+            "docs": [
+              "Runs the routine epoch machinery: `close_epoch` and `settle`. The",
+              "authority can do both as well, and only the authority can `force_settle`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "collateral_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "oracle",
+            "type": "pubkey"
+          },
+          {
+            "name": "quote_signer",
+            "type": "pubkey"
+          },
+          {
+            "name": "total_shares",
+            "type": "u64"
+          },
+          {
+            "name": "locked",
+            "type": "u64"
+          },
+          {
+            "name": "available",
+            "type": "u64"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "epoch_end",
+            "type": "i64"
+          },
+          {
+            "name": "settle_price",
+            "docs": [
+              "The price every position in `epoch` pays out against. Only meaningful",
+              "while `state == Closed`; stale between `roll_epoch` and `close_epoch`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "state",
+            "type": {
+              "defined": {
+                "name": "EpochState"
+              }
+            }
+          },
+          {
+            "name": "open_positions",
+            "docs": [
+              "Written and not yet settled, across every epoch. Gates `roll_epoch` and",
+              "the LP flows, and is a keeper's outstanding-settle count."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "epoch_premium",
+            "docs": [
+              "Running totals for the CURRENT epoch, zeroed at every `roll_epoch` and",
+              "copied onto the `EpochRecord` at `close_epoch`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "epoch_collateral",
+            "type": "u64"
+          },
+          {
+            "name": "epoch_positions",
+            "type": "u32"
+          },
+          {
+            "name": "share_price_open",
+            "docs": [
+              "Share price stamped at the roll that opened the current epoch."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "kind",
+            "type": "u8"
+          },
+          {
+            "name": "pool_name",
+            "type": "string"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PushPriceEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "oracle",
+            "type": "pubkey"
+          },
+          {
+            "name": "price",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          },
+          {
+            "name": "count",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SettleEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "payout",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "WithdrawEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
+}
