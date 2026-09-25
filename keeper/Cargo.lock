@@ -4938,6 +4938,8 @@ name = "stocklana-keeper"
 version = "0.1.0"
 dependencies = [
  "anchor-client",
+ "reqwest",
+ "serde_json",
  "stocklana",
 ]
 

@@ -6,10 +6,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-stocklana = "86kDc93MAkfLm3JNi43KYcFPiKZ765tYHPTekxmp1Ukb"
+stocklana = "548P3sxkEEeE1L935jh4y7Tcosp5zUjCeR7Nn7NL1MHr"
 
 [programs.devnet]
-stocklana = "86kDc93MAkfLm3JNi43KYcFPiKZ765tYHPTekxmp1Ukb"
+stocklana = "548P3sxkEEeE1L935jh4y7Tcosp5zUjCeR7Nn7NL1MHr"
 
 [registry]
 url = "https://api.apr.dev"

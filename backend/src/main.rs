@@ -10,7 +10,7 @@
 //!
 //! Config (env):
 //!   RPC_URL              default http://127.0.0.1:8899
-//!   PROGRAM_ID           default 86kDc93MAkfLm3JNi43KYcFPiKZ765tYHPTekxmp1Ukb
+//!   PROGRAM_ID           default 548P3sxkEEeE1L935jh4y7Tcosp5zUjCeR7Nn7NL1MHr
 //!   POOL                 required — the pool this backend serves
 //!   QUOTE_SIGNER_KEYPAIR required — must equal pool.quote_signer, else /buy txs fail
 //!   BIND                 default 0.0.0.0:8080
@@ -84,7 +84,7 @@ fn load_cfg() -> Res<Cfg> {
     Ok(Cfg {
         pool: env("POOL").ok_or("POOL is required")?.parse()?,
         program_id: env("PROGRAM_ID")
-            .unwrap_or_else(|| "86kDc93MAkfLm3JNi43KYcFPiKZ765tYHPTekxmp1Ukb".into())
+            .unwrap_or_else(|| "548P3sxkEEeE1L935jh4y7Tcosp5zUjCeR7Nn7NL1MHr".into())
             .parse()?,
         quote_signer: read_keypair_file(&ks).map_err(|e| format!("quote signer key: {e}"))?,
         spread_bps: env("SPREAD_BPS").and_then(|s| s.parse().ok()).unwrap_or(200),

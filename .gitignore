@@ -7,3 +7,9 @@ test-ledger
 .yarn
 keys/
 *.log
+*.price
+*.mjs
+.claude
+CLAUDE.md
+devnet.json
+scripts
