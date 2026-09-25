@@ -1,5 +1,5 @@
 [package]
-name = "stocklana-backend"
+name = "tessen-backend"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,11 +8,11 @@ edition = "2021"
 [workspace]
 
 [[bin]]
-name = "backend"
+name = "tessen-backend"
 path = "src/main.rs"
 
 [dependencies]
-stocklana = { path = "../programs/stocklana", features = ["no-entrypoint"] }
+tessen = { path = "../programs/tessen", features = ["no-entrypoint"] }
 anchor-lang = "0.32.2"
 solana-client = "2.3"
 solana-sdk = "2.3"
@@ -23,3 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = "1"
 base64 = "0.22"
+dotenvy = "0.15"
+
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

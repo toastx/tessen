@@ -1,4 +1,4 @@
-//! stocklana backend — read API + quote signer + live cache for one pool.
+//! Tessen backend — read API + quote signer + live cache for every pool.
 //!
 //! Pieces:
 //!   * indexer  — polls the chain, reconciles pool/positions/epochs into SQLite,
@@ -11,22 +11,21 @@
 //! Config (env):
 //!   RPC_URL              default http://127.0.0.1:8899
 //!   PROGRAM_ID           default 548P3sxkEEeE1L935jh4y7Tcosp5zUjCeR7Nn7NL1MHr
-//!   POOL                 required — the pool this backend serves
-//!   QUOTE_SIGNER_KEYPAIR required — must equal pool.quote_signer, else /buy txs fail
+//!   QUOTE_SIGNER_PRIVATE_KEY JSON byte array for the shared quote signer
 //!   BIND                 default 0.0.0.0:8080
-//!   DB_PATH              default backend.db
+//!   PORT                 hosting fallback when BIND is unset
+//!   DB_PATH              default tessen.db
 //!   POLL_SECS            default 5
 //!   SPREAD_BPS           default 200  (2% of collateral, added over intrinsic)
 //!   QUOTE_TTL_SECS       default 60   (< on-chain MAX_QUOTE_TTL of 300)
 //!
-//! ponytail: single-pool, polling indexer (not accountSubscribe), server-side
-//! re-pricing on /buy. Multi-pool = a pool column already exists in the cache;
-//! websocket chain-subscribe = swap the poll loop; both are upgrades, not needed
-//! for one pool on a daily epoch.
+//! ponytail: polling indexer (not accountSubscribe), server-side re-pricing on
+//! /buy. Websocket chain-subscribe can replace the poll loop when needed.
 
 mod chain;
 mod db;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -39,18 +38,17 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::{read_keypair_file, Keypair, Signer};
+use solana_sdk::signature::{Keypair, Signer};
 use tokio::sync::broadcast;
 
 use chain::{price, spot_from, Chain};
 use db::Db;
-use stocklana::{EpochRecord, EpochState, OptionPosition, Oracle, Pool};
+use tessen::{EpochRecord, EpochState, OptionPosition, Oracle, Pool};
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type ApiErr = (StatusCode, String);
 
 struct Cfg {
-    pool: Pubkey,
     program_id: Pubkey,
     quote_signer: Keypair,
     spread_bps: u64,
@@ -69,6 +67,11 @@ struct AppState {
 fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|s| !s.is_empty())
 }
+
+fn load_dotenv() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+    let _ = dotenvy::from_path(path);
+}
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -80,17 +83,31 @@ fn oops<E: std::fmt::Display>(e: E) -> ApiErr {
 }
 
 fn load_cfg() -> Res<Cfg> {
-    let ks = env("QUOTE_SIGNER_KEYPAIR").ok_or("QUOTE_SIGNER_KEYPAIR is required")?;
     Ok(Cfg {
-        pool: env("POOL").ok_or("POOL is required")?.parse()?,
         program_id: env("PROGRAM_ID")
             .unwrap_or_else(|| "548P3sxkEEeE1L935jh4y7Tcosp5zUjCeR7Nn7NL1MHr".into())
             .parse()?,
-        quote_signer: read_keypair_file(&ks).map_err(|e| format!("quote signer key: {e}"))?,
-        spread_bps: env("SPREAD_BPS").and_then(|s| s.parse().ok()).unwrap_or(200),
-        quote_ttl: env("QUOTE_TTL_SECS").and_then(|s| s.parse().ok()).unwrap_or(60),
+        quote_signer: load_quote_signer()?,
+        spread_bps: env("SPREAD_BPS")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(200),
+        quote_ttl: env("QUOTE_TTL_SECS")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60),
         poll: Duration::from_secs(env("POLL_SECS").and_then(|s| s.parse().ok()).unwrap_or(5)),
     })
+}
+
+fn load_quote_signer() -> Res<Keypair> {
+    let value = env("QUOTE_SIGNER_PRIVATE_KEY").ok_or("QUOTE_SIGNER_PRIVATE_KEY is required")?;
+    parse_quote_signer(&value)
+}
+
+fn parse_quote_signer(value: &str) -> Res<Keypair> {
+    let bytes: Vec<u8> = serde_json::from_str(value)
+        .map_err(|e| format!("QUOTE_SIGNER_PRIVATE_KEY must be a JSON byte array: {e}"))?;
+    Keypair::try_from(bytes.as_slice())
+        .map_err(|e| format!("invalid QUOTE_SIGNER_PRIVATE_KEY: {e}").into())
 }
 
 fn state_str(s: EpochState) -> &'static str {
@@ -101,14 +118,16 @@ fn state_str(s: EpochState) -> &'static str {
     }
 }
 
-fn pool_json(p: &Pool) -> Value {
+fn pool_json(key: &Pubkey, p: &Pool) -> Value {
     json!({
+        "pubkey": key.to_string(),
         "authority": p.authority.to_string(),
         "keeper": p.keeper.to_string(),
         "collateral_mint": p.collateral_mint.to_string(),
         "vault": p.vault.to_string(),
         "oracle": p.oracle.to_string(),
         "quote_signer": p.quote_signer.to_string(),
+        "pool_name": p.pool_name,
         "total_shares": p.total_shares,
         "locked": p.locked,
         "available": p.available,
@@ -160,20 +179,32 @@ fn epoch_json(r: &EpochRecord) -> Value {
     })
 }
 
-/// One reconciliation pass: pool, its positions, its epoch records.
-async fn index_once(s: &AppState) -> Res<()> {
+/// One reconciliation pass for every pool, position and epoch record.
+async fn index_once(s: &AppState) -> Res<usize> {
     let ts = now();
-    let pool_str = s.cfg.pool.to_string();
+    let pools = s.chain.all::<Pool>().await?;
+    let pool_keys = pools.iter().map(|(key, _)| *key).collect::<HashSet<_>>();
 
-    let pool = s.chain.account::<Pool>(&s.cfg.pool).await?;
-    let pj = pool_json(&pool);
-    s.db.upsert(&pool_str, "pool", None, None, &pj.to_string(), ts)?;
-    let _ = s.tx.send(json!({"type": "pool", "pubkey": pool_str, "data": pj}).to_string());
+    for (key, pool) in &pools {
+        let pool_str = key.to_string();
+        let pj = pool_json(key, pool);
+        s.db.upsert(
+            &pool_str,
+            "pool",
+            Some(&pool_str),
+            None,
+            &pj.to_string(),
+            ts,
+        )?;
+        let _ =
+            s.tx.send(json!({"type": "pool", "pubkey": pool_str, "data": pj}).to_string());
+    }
 
     for (pk, pos) in s.chain.all::<OptionPosition>().await? {
-        if pos.pool != s.cfg.pool {
+        if !pool_keys.contains(&pos.pool) {
             continue;
         }
+        let pool_str = pos.pool.to_string();
         let pj = position_json(&pos);
         s.db.upsert(
             &pk.to_string(),
@@ -189,34 +220,34 @@ async fn index_once(s: &AppState) -> Res<()> {
     }
 
     for (pk, rec) in s.chain.all::<EpochRecord>().await? {
-        // EpochRecord carries no pool field; its PDA seeds do. Match the seed to
-        // confirm the record belongs to our pool before caching it.
-        let expect = Pubkey::find_program_address(
-            &[b"epoch", s.cfg.pool.as_ref(), &rec.epoch.to_le_bytes()],
-            &s.cfg.program_id,
-        )
-        .0;
-        if expect != pk {
+        let Some(pool) = pools.iter().find_map(|(pool, _)| {
+            let expected = Pubkey::find_program_address(
+                &[b"epoch", pool.as_ref(), &rec.epoch.to_le_bytes()],
+                &s.cfg.program_id,
+            )
+            .0;
+            (expected == pk).then_some(*pool)
+        }) else {
             continue;
-        }
+        };
         s.db.upsert(
             &pk.to_string(),
             "epoch",
-            Some(&pool_str),
+            Some(&pool.to_string()),
             None,
             &epoch_json(&rec).to_string(),
             ts,
         )?;
     }
-    Ok(())
+    Ok(pools.len())
 }
 
 async fn indexer(state: AppState) {
     loop {
+        tokio::time::sleep(state.cfg.poll).await;
         if let Err(e) = index_once(&state).await {
             eprintln!("index error: {e}");
         }
-        tokio::time::sleep(state.cfg.poll).await;
     }
 }
 
@@ -226,8 +257,20 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn get_pool(State(s): State<AppState>) -> Result<Json<Value>, ApiErr> {
-    match s.db.get(&s.cfg.pool.to_string()).map_err(oops)? {
+#[derive(Deserialize)]
+struct PoolQuery {
+    pool: String,
+}
+
+async fn get_pools(State(s): State<AppState>) -> Result<Json<Value>, ApiErr> {
+    rows_to_array(s.db.list("pool", None, None).map_err(oops)?)
+}
+
+async fn get_pool(
+    State(s): State<AppState>,
+    Query(q): Query<PoolQuery>,
+) -> Result<Json<Value>, ApiErr> {
+    match s.db.get(&q.pool).map_err(oops)? {
         Some(j) => Ok(Json(serde_json::from_str(&j).map_err(oops)?)),
         None => Err((StatusCode::NOT_FOUND, "pool not indexed yet".into())),
     }
@@ -242,13 +285,16 @@ fn rows_to_array(rows: Vec<String>) -> Result<Json<Value>, ApiErr> {
     Ok(Json(Value::Array(items)))
 }
 
-async fn get_epochs(State(s): State<AppState>) -> Result<Json<Value>, ApiErr> {
-    let pool = s.cfg.pool.to_string();
-    rows_to_array(s.db.list("epoch", Some(&pool), None).map_err(oops)?)
+async fn get_epochs(
+    State(s): State<AppState>,
+    Query(q): Query<PoolQuery>,
+) -> Result<Json<Value>, ApiErr> {
+    rows_to_array(s.db.list("epoch", Some(&q.pool), None).map_err(oops)?)
 }
 
 #[derive(Deserialize)]
 struct PosQuery {
+    pool: String,
     owner: Option<String>,
 }
 
@@ -256,41 +302,69 @@ async fn get_positions(
     State(s): State<AppState>,
     Query(q): Query<PosQuery>,
 ) -> Result<Json<Value>, ApiErr> {
-    let pool = s.cfg.pool.to_string();
     rows_to_array(
-        s.db.list("position", Some(&pool), q.owner.as_deref())
+        s.db.list("position", Some(&q.pool), q.owner.as_deref())
             .map_err(oops)?,
     )
 }
 
 #[derive(Deserialize)]
 struct QuoteReq {
+    pool: String,
     strike: u64,
     size: u64,
 }
 
 /// Shared pricing: live oracle median -> quote at/above intrinsic, checked
 /// against available collateral. Returns the pool too, which /buy needs.
-async fn priced(s: &AppState, strike: u64, size: u64) -> Result<(Pool, chain::Quote), ApiErr> {
-    let pool = s.chain.account::<Pool>(&s.cfg.pool).await.map_err(oops)?;
-    let oracle = s.chain.account::<Oracle>(&pool.oracle).await.map_err(oops)?;
-    let spot = spot_from(&oracle).ok_or((StatusCode::CONFLICT, "oracle has no samples".into()))?;
-    let q = price(pool.kind, strike, size, spot, s.cfg.spread_bps, s.cfg.quote_ttl, now())
+async fn priced(
+    s: &AppState,
+    pool_key: &Pubkey,
+    strike: u64,
+    size: u64,
+) -> Result<(Pool, chain::Quote), ApiErr> {
+    let pool = s.chain.account::<Pool>(pool_key).await.map_err(oops)?;
+    let oracle = s
+        .chain
+        .account::<Oracle>(&pool.oracle)
+        .await
         .map_err(oops)?;
+    let spot = spot_from(&oracle).ok_or((StatusCode::CONFLICT, "oracle has no samples".into()))?;
+    let q = price(
+        pool.kind,
+        strike,
+        size,
+        spot,
+        s.cfg.spread_bps,
+        s.cfg.quote_ttl,
+        now(),
+    )
+    .map_err(oops)?;
     if q.collateral > pool.available {
-        return Err((StatusCode::CONFLICT, "pool has insufficient available collateral".into()));
+        return Err((
+            StatusCode::CONFLICT,
+            "pool has insufficient available collateral".into(),
+        ));
     }
     Ok((pool, q))
 }
 
 /// Price an option against the live oracle median, at/above intrinsic.
-async fn quote(State(s): State<AppState>, Json(req): Json<QuoteReq>) -> Result<Json<Value>, ApiErr> {
-    let (_, q) = priced(&s, req.strike, req.size).await?;
+async fn quote(
+    State(s): State<AppState>,
+    Json(req): Json<QuoteReq>,
+) -> Result<Json<Value>, ApiErr> {
+    let pool = req
+        .pool
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "bad pool pubkey".into()))?;
+    let (_, q) = priced(&s, &pool, req.strike, req.size).await?;
     Ok(Json(serde_json::to_value(q).map_err(oops)?))
 }
 
 #[derive(Deserialize)]
 struct BuyReq {
+    pool: String,
     buyer: String,
     id: u64,
     strike: u64,
@@ -304,11 +378,21 @@ async fn buy(State(s): State<AppState>, Json(req): Json<BuyReq>) -> Result<Json<
         .buyer
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "bad buyer pubkey".into()))?;
-    let (pool, q) = priced(&s, req.strike, req.size).await?;
+    let pool_key: Pubkey = req
+        .pool
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "bad pool pubkey".into()))?;
+    let (pool, q) = priced(&s, &pool_key, req.strike, req.size).await?;
+    if pool.quote_signer != s.cfg.quote_signer.pubkey() {
+        return Err((
+            StatusCode::CONFLICT,
+            "configured quote signer does not match this pool".into(),
+        ));
+    }
     let tx = s
         .chain
         .build_buy(
-            &s.cfg.pool,
+            &pool_key,
             &pool,
             &buyer,
             req.id,
@@ -343,10 +427,12 @@ async fn ws_loop(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
 
 #[tokio::main]
 async fn main() -> Res<()> {
+    load_dotenv();
     let cfg = load_cfg()?;
     let rpc_url = env("RPC_URL").unwrap_or_else(|| "http://127.0.0.1:8899".into());
-    let db = Db::open(&env("DB_PATH").unwrap_or_else(|| "backend.db".into()))?;
-    let chain = Chain::new(rpc_url, cfg.program_id);
+    let db_path = env("DB_PATH").unwrap_or_else(|| "tessen.db".into());
+    let db = Db::open(&db_path)?;
+    let chain = Chain::new(rpc_url.clone(), cfg.program_id);
     let (tx, _) = broadcast::channel::<String>(256);
 
     let state = AppState {
@@ -356,10 +442,19 @@ async fn main() -> Res<()> {
         tx,
     };
 
+    let pool_count = index_once(&state).await?;
+    if pool_count == 0 {
+        return Err(format!(
+            "no pools found for program {} at {rpc_url}",
+            state.cfg.program_id
+        )
+        .into());
+    }
     tokio::spawn(indexer(state.clone()));
 
     let app = Router::new()
         .route("/health", get(health))
+        .route("/pools", get(get_pools))
         .route("/pool", get(get_pool))
         .route("/epochs", get(get_epochs))
         .route("/positions", get(get_positions))
@@ -368,13 +463,33 @@ async fn main() -> Res<()> {
         .route("/ws", get(ws))
         .with_state(state.clone());
 
-    let bind = env("BIND").unwrap_or_else(|| "0.0.0.0:8080".into());
+    let bind = env("BIND")
+        .or_else(|| env("PORT").map(|port| format!("0.0.0.0:{port}")))
+        .unwrap_or_else(|| "0.0.0.0:8080".into());
     println!(
-        "backend up on {bind}: pool={} quote_signer={}",
-        state.cfg.pool,
+        "backend up on {bind}: pools={pool_count} rpc={rpc_url} db={db_path} quote_signer={}",
         state.cfg.quote_signer.pubkey()
     );
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_quote_signer_private_key() {
+        let signer = Keypair::new();
+        let value = serde_json::to_string(&signer.to_bytes().to_vec()).unwrap();
+        let parsed = parse_quote_signer(&value).unwrap();
+        assert_eq!(parsed.to_bytes(), signer.to_bytes());
+    }
+
+    #[test]
+    fn rejects_invalid_quote_signer_private_key() {
+        assert!(parse_quote_signer("[1,2,3]").is_err());
+        assert!(parse_quote_signer("not-json").is_err());
+    }
 }

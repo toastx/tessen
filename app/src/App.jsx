@@ -3,7 +3,7 @@ import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { CLUSTERS } from "./cluster";
 import { useBackend } from "./api";
-import { PROGRAM_ID, poolPda, useOracle, useProgram, usePoolOnCluster, useLpShares, useTokenBalance } from "./chain";
+import { PROGRAM_ID, useOracle, useProgram, usePoolOnCluster, useLpShares, useTokenBalance } from "./chain";
 import { clock, dur, sharePrice, short, ui, usd } from "./format";
 import { Dashboard, Trade, Liquidity, Positions, History, Status } from "./tabs";
 
@@ -38,12 +38,9 @@ export default function App({ cluster, onCluster }) {
   const { publicKey } = useWallet();
   const owner = publicKey?.toBase58() ?? null;
 
-  const { pool: indexed, epochs, positions, error, live, refresh } = useBackend(owner);
-  // the backend serves pool state but not the pool's own address; its PDA seeds
-  // are the mint and kind it already returns, so derive rather than configure
+  const { pools, pool: indexed, epochs, positions, error, live, selectPool, refresh } = useBackend(owner);
   const pool = useMemo(() => indexed && {
     ...indexed,
-    pubkey: poolPda(indexed.collateral_mint, indexed.kind).toBase58(),
     program_id: PROGRAM_ID.toBase58()
   }, [indexed]);
   const program = useProgram();
@@ -92,7 +89,7 @@ export default function App({ cluster, onCluster }) {
     <div style={{ minHeight: "100vh", background: "var(--color-bg)", color: "var(--color-text)", fontFamily: "Inter,system-ui,sans-serif", paddingBottom: 48 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 22, padding: "18px 32px", maxWidth: 1280, margin: "0 auto" }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginRight: "auto" }}>
-          <span style={{ fontSize: 19, fontWeight: 600, letterSpacing: "-0.02em" }}>stocklana</span>
+          <span style={{ fontSize: 19, fontWeight: 600, letterSpacing: "-0.02em" }}>tessen</span>
           <span style={{ fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--color-accent-500)" }}>cash-secured put vault</span>
         </div>
         <nav style={{ display: "flex", gap: 2, padding: 4, borderRadius: 999, background: "color-mix(in srgb,var(--color-surface) 85%,transparent)", boxShadow: "inset 0 1px 0 color-mix(in srgb,var(--color-text) 6%,transparent),0 0 0 1px color-mix(in srgb,var(--color-neutral-700) 45%,transparent)" }}>
@@ -106,6 +103,14 @@ export default function App({ cluster, onCluster }) {
             }}>{label}</button>
           ))}
         </nav>
+        {pools.length > 1 && (
+          <select value={pool?.pubkey || ""} onChange={e => selectPool(e.target.value)} title="Pool" style={{
+            background: "var(--color-surface)", color: "var(--color-neutral-300)", fontSize: 12,
+            border: "1px solid var(--color-divider)", borderRadius: 999, padding: "6px 10px", cursor: "pointer"
+          }}>
+            {pools.map(item => <option key={item.pubkey} value={item.pubkey}>{item.pool_name || `Pool ${short(item.pubkey)}`}</option>)}
+          </select>
+        )}
         <select value={cluster} onChange={e => onCluster(e.target.value)} title="Cluster" style={{
           background: "var(--color-surface)", color: "var(--color-neutral-300)", fontSize: 12,
           border: "1px solid var(--color-divider)", borderRadius: 999, padding: "6px 10px", cursor: "pointer"

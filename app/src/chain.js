@@ -8,17 +8,18 @@ import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { PublicKey, Transaction } from "@solana/web3.js";
 // straight from anchor's output — a copied IDL goes stale the moment an
 // accounts struct changes, and the failure is a confusing account error
-import idl from "../../target/idl/stocklana.json";
+import idl from "../../target/idl/tessen.json";
 import { buildBuy } from "./api";
 import { medianOf } from "./format";
 
 export const PROGRAM_ID = new PublicKey(idl.address);
 const key = s => (s ? new PublicKey(s) : null);
 
-/** The pool's own address — seeds are [b"pool", collateral_mint, kind], both of
- *  which the backend already returns, so it needs no extra config to find. */
-export const poolPda = (mint, kind) =>
-  PublicKey.findProgramAddressSync([Buffer.from("pool"), new PublicKey(mint).toBuffer(), Uint8Array.of(kind)], PROGRAM_ID)[0];
+/** Named pools may share one collateral mint and option kind. */
+export const poolPda = (mint, kind, poolName) =>
+  PublicKey.findProgramAddressSync([
+    Buffer.from("pool"), new PublicKey(mint).toBuffer(), Uint8Array.of(kind), Buffer.from(poolName)
+  ], PROGRAM_ID)[0];
 
 export const lpPda = (pool, owner) =>
   PublicKey.findProgramAddressSync([Buffer.from("lp"), pool.toBuffer(), owner.toBuffer()], PROGRAM_ID)[0];
@@ -140,8 +141,8 @@ export const claim = (program, pool, position) =>
  * The premium the user signs is the backend's, not the displayed quote — the
  * caller must show it before this runs.
  */
-export async function buyOption(connection, signTransaction, buyer, id, strikeRaw, sizeRaw) {
-  const built = await buildBuy(buyer.toBase58(), id, strikeRaw, sizeRaw);
+export async function buyOption(connection, signTransaction, pool, buyer, id, strikeRaw, sizeRaw) {
+  const built = await buildBuy(pool, buyer.toBase58(), id, strikeRaw, sizeRaw);
   const tx = Transaction.from(Uint8Array.from(atob(built.transaction), c => c.charCodeAt(0)));
   const signed = await signTransaction(tx); // quote_signer already signed
   const sig = await connection.sendRawTransaction(signed.serialize());

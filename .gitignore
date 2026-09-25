@@ -13,3 +13,5 @@ keys/
 CLAUDE.md
 devnet.json
 scripts
+*.env
+*.db

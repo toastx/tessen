@@ -72,7 +72,7 @@ export function Dashboard({ pool, epochs, epoch, nav, spot, oracle, setTab, publ
   const navDelta = series.length > 1 ? ((series[series.length - 1] / series[0] - 1) * 100).toFixed(2) : null;
 
   const presets = strikeLadder(ui(spot));
-  const goTrade = strike => () => { sessionStorage.setItem("stocklana.strike", strike.toFixed(2)); setTab("trade"); };
+  const goTrade = strike => () => { sessionStorage.setItem("tessen.strike", strike.toFixed(2)); setTab("trade"); };
 
   return (
     <>
@@ -226,13 +226,13 @@ export function Dashboard({ pool, epochs, epoch, nav, spot, oracle, setTab, publ
 // ─────────────────────────────────────────────────────────── Trade
 export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, settled, flash, setTab }) {
   const { signTransaction } = useWallet();
-  const [strike, setStrike] = useState(() => sessionStorage.getItem("stocklana.strike") || "");
+  const [strike, setStrike] = useState(() => sessionStorage.getItem("tessen.strike") || "");
   const [size, setSize] = useState("1");
   const [q, setQ] = useState(null);       // {premium, collateral, intrinsic, spot, quote_expiry, at}
   const [err, setErr] = useState(null);
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState(false);
-  useEffect(() => { sessionStorage.removeItem("stocklana.strike"); }, []);
+  useEffect(() => { sessionStorage.removeItem("tessen.strike"); }, []);
 
   const locked = pool.state !== "open" || !publicKey;
   const lockReason = !publicKey ? "Connect a wallet to request a quote."
@@ -250,7 +250,7 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
     catch { setQ(null); return setErr({ code: 400, title: "Bad input", body: "Strike and size must both be positive numbers." }); }
     if (!s || !z) { setQ(null); return setErr({ code: 400, title: "Bad input", body: "Strike and size must both be greater than zero." }); }
     try {
-      const r = await quoteApi(s, z);
+      const r = await quoteApi(pool.pubkey, s, z);
       setQ({ ...r, strikeRaw: s, sizeRaw: z, at: Math.floor(Date.now() / 1000) });
     } catch (e) {
       setQ(null);
@@ -262,7 +262,7 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
     setConfirm(false);
     setBusy(true);
     try {
-      const r = await buyOption(connection, signTransaction, publicKey, newPositionId(), q.strikeRaw, q.sizeRaw);
+      const r = await buyOption(connection, signTransaction, pool.pubkey, publicKey, newPositionId(), q.strikeRaw, q.sizeRaw);
       setQ(null);
       settled(`Position opened · premium ${usd(ui(r.premium))} paid · ${short(r.sig)}`);
       setTab("positions");

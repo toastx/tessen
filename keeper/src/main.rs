@@ -1,15 +1,18 @@
-//! stocklana keeper — the off-chain operator loop.
+//! Tessen keeper — the off-chain operator loop.
 //!
-//! One process that runs the routine epoch machinery against a deployed pool:
-//! pushes oracle prices on a cadence, closes the epoch at its boundary, settles
+//! A supervisor process starts one worker process per deployed pool. Each worker
+//! pushes oracle prices on a cadence, closes its epoch at the boundary, settles
 //! every position, then rolls the next epoch.
 //!
-//! Config is all env vars (pubkeys base58, keypairs are solana-cli json files):
+//! Config is all env vars (pubkeys base58, private keys are JSON byte arrays):
 //!   RPC_URL             default http://127.0.0.1:8899
 //!   PROGRAM_ID          default 548P3sxkEEeE1L935jh4y7Tcosp5zUjCeR7Nn7NL1MHr
-//!   POOL                required — the pool PDA; oracle/vault/mint are read off it
-//!   KEEPER_KEYPAIR      required — fee payer, signs push/close/settle
-//!   AUTHORITY_KEYPAIR   optional — signs roll_epoch (default: KEEPER_KEYPAIR)
+//!   POOL_1              required — first pool PDA
+//!   EPOCH_LEN_SECS_1    required — first pool's epoch length
+//!   POOL_2              required — second pool PDA
+//!   EPOCH_LEN_SECS_2    required — second pool's epoch length
+//!   KEEPER_PRIVATE_KEY  required — fee payer, signs push/close/settle
+//!   AUTHORITY_PRIVATE_KEY optional — signs roll_epoch (default: keeper key)
 //!   PRICE_URL           preStocks API, default https://prestocks.com/api/prestocks
 //!   PRICE_SYMBOL        which preStock to track, default ANTHROPIC
 //!   PRICE_FIELD         mark|token (or the full markPrice/tokenPrice), default mark
@@ -17,32 +20,40 @@
 //!   PRICE_FILE          override: a file of dollars ("212.34"), re-read every tick
 //!   PRICE_1E6           override: a static 1e6-scaled price, for offline runs
 //!   PUSH_INTERVAL_SECS  default 60
-//!   EPOCH_LEN_SECS      default 86400
 //!
 //! LOAD-BEARING INVARIANT: once `now >= epoch_end` this loop STOPS pushing and
 //! closes. A push landing after expiry rotates the in-window samples out of the
 //! 32-slot ring and bricks `close_epoch` forever — that is the whole recovery
 //! story in the program's `close_epoch` ponytail, and `phase()` encodes it.
 
+use std::process::{Child, Command};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anchor_client::solana_sdk::commitment_config::CommitmentConfig;
 use anchor_client::solana_sdk::pubkey::Pubkey;
-use anchor_client::solana_sdk::signature::{read_keypair_file, Keypair};
+use anchor_client::solana_sdk::signature::Keypair;
 use anchor_client::solana_sdk::signer::Signer;
 use anchor_client::{Client, Cluster, Program};
 
-use stocklana::{EpochState, OptionPosition, Oracle, Pool};
+use tessen::{EpochState, OptionPosition, Oracle, Pool};
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
 const BPS: u128 = 10_000;
 const MAX_DEV_BPS: u128 = 1_000; // mirrors the program's push deviation band
 const PRESTOCKS_API: &str = "https://prestocks.com/api/prestocks";
+const WORKER_PROCESS: &str = "TESSEN_KEEPER_WORKER";
 /// How old a polled price may get before every push says so out loud.
 const STALE_WARN_SECS: i64 = 300;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PoolConfig {
+    name: String,
+    pool: Pubkey,
+    epoch_len: i64,
+}
 
 struct Config {
     rpc_url: String,
@@ -59,11 +70,52 @@ fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|s| !s.is_empty())
 }
 
+fn load_dotenv() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
+    let _ = dotenvy::from_path(path);
+}
+
+fn parse_pool_config(name: String, pool: String, epoch_len: String) -> Res<PoolConfig> {
+    let epoch_len = epoch_len.parse::<i64>()?;
+    if epoch_len <= 0 {
+        return Err(format!("{name} epoch length must be positive").into());
+    }
+    Ok(PoolConfig {
+        name,
+        pool: pool.parse()?,
+        epoch_len,
+    })
+}
+
+fn load_pool_config(slot: usize) -> Res<PoolConfig> {
+    let pool_key = format!("POOL_{slot}");
+    let epoch_key = format!("EPOCH_LEN_SECS_{slot}");
+    parse_pool_config(
+        format!("pool-{slot}"),
+        env(&pool_key).ok_or_else(|| format!("{pool_key} is required"))?,
+        env(&epoch_key).ok_or_else(|| format!("{epoch_key} is required"))?,
+    )
+}
+
+fn load_pool_configs() -> Res<[PoolConfig; 2]> {
+    let configs = [load_pool_config(1)?, load_pool_config(2)?];
+    if configs[0].pool == configs[1].pool {
+        return Err("POOL_1 and POOL_2 must be different".into());
+    }
+    Ok(configs)
+}
+
+fn parse_keypair(value: &str, name: &str) -> Res<Keypair> {
+    let bytes: Vec<u8> = serde_json::from_str(value)
+        .map_err(|e| format!("{name} must be a JSON byte array: {e}"))?;
+    Keypair::try_from(bytes.as_slice()).map_err(|e| format!("invalid {name}: {e}").into())
+}
+
 fn load_config() -> Res<Config> {
-    let keeper_path = env("KEEPER_KEYPAIR").ok_or("KEEPER_KEYPAIR is required")?;
-    let keeper = read_keypair_file(&keeper_path).map_err(|e| format!("keeper key: {e}"))?;
-    let authority = match env("AUTHORITY_KEYPAIR") {
-        Some(p) => read_keypair_file(&p).map_err(|e| format!("authority key: {e}"))?,
+    let keeper_value = env("KEEPER_PRIVATE_KEY").ok_or("KEEPER_PRIVATE_KEY is required")?;
+    let keeper = parse_keypair(&keeper_value, "KEEPER_PRIVATE_KEY")?;
+    let authority = match env("AUTHORITY_PRIVATE_KEY") {
+        Some(value) => parse_keypair(&value, "AUTHORITY_PRIVATE_KEY")?,
         None => Keypair::try_from(&keeper.to_bytes()[..]).unwrap(), // default: same desk key
     };
     Ok(Config {
@@ -375,11 +427,11 @@ impl<'a> Keeper<'a> {
         };
         self.program
             .request()
-            .accounts(stocklana::accounts::PushPrice {
+            .accounts(tessen::accounts::PushPrice {
                 oracle: pool.oracle,
                 keeper: self.cfg.keeper.pubkey(),
             })
-            .args(stocklana::instruction::PushPrice { price })
+            .args(tessen::instruction::PushPrice { price })
             .send()?;
         println!("push  price={price} (target={target})");
         Ok(())
@@ -389,14 +441,14 @@ impl<'a> Keeper<'a> {
         let record = epoch_record_pda(&self.cfg.program_id, &self.cfg.pool, pool.epoch);
         self.program
             .request()
-            .accounts(stocklana::accounts::CloseEpoch {
+            .accounts(tessen::accounts::CloseEpoch {
                 operator: self.cfg.keeper.pubkey(),
                 pool: self.cfg.pool,
                 oracle: pool.oracle,
                 epoch_record: record,
                 system_program: anchor_client::anchor_lang::solana_program::system_program::ID,
             })
-            .args(stocklana::instruction::CloseEpoch {})
+            .args(tessen::instruction::CloseEpoch {})
             .send()?;
         println!("close epoch={}", pool.epoch);
         Ok(())
@@ -415,13 +467,13 @@ impl<'a> Keeper<'a> {
             let record = epoch_record_pda(&self.cfg.program_id, &self.cfg.pool, pos.epoch);
             self.program
                 .request()
-                .accounts(stocklana::accounts::Settle {
+                .accounts(tessen::accounts::Settle {
                     operator: self.cfg.keeper.pubkey(),
                     pool: self.cfg.pool,
                     position: key,
                     epoch_record: record,
                 })
-                .args(stocklana::instruction::Settle {})
+                .args(tessen::instruction::Settle {})
                 .send()?;
             println!("settle position={key}");
         }
@@ -432,11 +484,11 @@ impl<'a> Keeper<'a> {
         let epoch_end = now_ts() + self.cfg.epoch_len;
         self.program
             .request()
-            .accounts(stocklana::accounts::RollEpoch {
+            .accounts(tessen::accounts::RollEpoch {
                 pool: self.cfg.pool,
                 authority: self.cfg.authority.pubkey(),
             })
-            .args(stocklana::instruction::RollEpoch { epoch_end })
+            .args(tessen::instruction::RollEpoch { epoch_end })
             .signer(&self.cfg.authority)
             .send()?;
         println!("roll  epoch_end={epoch_end}");
@@ -468,7 +520,7 @@ impl<'a> Keeper<'a> {
     }
 }
 
-fn main() -> Res<()> {
+fn run_worker() -> Res<()> {
     let cfg = load_config()?;
     let cluster = Cluster::Custom(cfg.rpc_url.clone(), cfg.rpc_url.clone());
     let client =
@@ -501,6 +553,89 @@ fn main() -> Res<()> {
         } else {
             cfg.push_interval
         });
+    }
+}
+
+fn spawn_worker(exe: &std::path::Path, cfg: &PoolConfig) -> Res<Child> {
+    let child = Command::new(exe)
+        .env(WORKER_PROCESS, "1")
+        .env("POOL", cfg.pool.to_string())
+        .env("EPOCH_LEN_SECS", cfg.epoch_len.to_string())
+        .spawn()?;
+    println!(
+        "spawned {}: pid={} pool={} epoch={}s",
+        cfg.name,
+        child.id(),
+        cfg.pool,
+        cfg.epoch_len
+    );
+    Ok(child)
+}
+
+fn stop_worker(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn stop_all_workers(workers: &mut [(PoolConfig, Child)]) {
+    for (_, child) in workers {
+        stop_worker(child);
+    }
+}
+
+fn stop_workers(workers: &mut [(PoolConfig, Child)], exited: usize) {
+    for (index, (_, child)) in workers.iter_mut().enumerate() {
+        if index != exited {
+            stop_worker(child);
+        }
+    }
+}
+
+fn supervise_workers(mut workers: Vec<(PoolConfig, Child)>) -> Res<()> {
+    loop {
+        for index in 0..workers.len() {
+            match workers[index].1.try_wait() {
+                Ok(Some(status)) => {
+                    let name = workers[index].0.name.clone();
+                    stop_workers(&mut workers, index);
+                    return Err(format!("{name} worker exited with {status}").into());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    stop_all_workers(&mut workers);
+                    return Err(error.into());
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn spawn_workers(exe: &std::path::Path, configs: [PoolConfig; 2]) -> Res<Vec<(PoolConfig, Child)>> {
+    let mut workers = Vec::with_capacity(configs.len());
+    for cfg in configs {
+        match spawn_worker(exe, &cfg) {
+            Ok(child) => workers.push((cfg, child)),
+            Err(error) => {
+                stop_all_workers(&mut workers);
+                return Err(error);
+            }
+        }
+    }
+    Ok(workers)
+}
+
+fn run_supervisor() -> Res<()> {
+    let exe = std::env::current_exe()?;
+    supervise_workers(spawn_workers(&exe, load_pool_configs()?)?)
+}
+
+fn main() -> Res<()> {
+    load_dotenv();
+    if env(WORKER_PROCESS).is_some() {
+        run_worker()
+    } else {
+        run_supervisor()
     }
 }
 
@@ -668,5 +803,46 @@ mod tests {
         assert_eq!(phase(EpochState::Closed, 300, 200, 2), Phase::Settle);
         assert_eq!(phase(EpochState::Closed, 300, 200, 0), Phase::Roll);
         assert_eq!(phase(EpochState::Genesis, 0, 0, 0), Phase::Roll);
+    }
+
+    #[test]
+    fn parses_pool_worker_config() {
+        let cfg = parse_pool_config(
+            "conservative".into(),
+            "5bdNVCZnVzUqirPNBqWY2Ehuxe6aFDsKnAUPD8aKY4yY".into(),
+            "86400".into(),
+        )
+        .unwrap();
+        assert_eq!(cfg.name, "conservative");
+        assert_eq!(cfg.epoch_len, 86_400);
+        assert_eq!(
+            cfg.pool.to_string(),
+            "5bdNVCZnVzUqirPNBqWY2Ehuxe6aFDsKnAUPD8aKY4yY"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_pool_worker_config() {
+        assert!(parse_pool_config("bad-pool".into(), "nope".into(), "3600".into()).is_err());
+        assert!(parse_pool_config(
+            "bad-epoch".into(),
+            "7zdb5RBTjnJsCReqj9ppV3BNJKBErekYAiSceevByrBQ".into(),
+            "0".into(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parses_private_key_byte_array() {
+        let signer = Keypair::new();
+        let value = serde_json::to_string(&signer.to_bytes().to_vec()).unwrap();
+        let parsed = parse_keypair(&value, "TEST_PRIVATE_KEY").unwrap();
+        assert_eq!(parsed.to_bytes(), signer.to_bytes());
+    }
+
+    #[test]
+    fn rejects_invalid_private_key_byte_array() {
+        assert!(parse_keypair("[1,2,3]", "TEST_PRIVATE_KEY").is_err());
+        assert!(parse_keypair("not-json", "TEST_PRIVATE_KEY").is_err());
     }
 }

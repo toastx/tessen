@@ -7,7 +7,7 @@ export const CLUSTERS = {
   localnet: { label: "Localnet", endpoint: "http://127.0.0.1:8899" }
 };
 
-const KEY = "stocklana.cluster";
+const KEY = "tessen.cluster";
 
 export function initialCluster() {
   const q = new URLSearchParams(location.search).get("cluster");

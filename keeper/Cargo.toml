@@ -1,5 +1,5 @@
 [package]
-name = "stocklana-keeper"
+name = "tessen-keeper"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,7 +9,7 @@ edition = "2021"
 [workspace]
 
 [[bin]]
-name = "keeper"
+name = "tessen-keeper"
 path = "src/main.rs"
 
 [dependencies]
@@ -19,5 +19,9 @@ anchor-client = "0.32.2"
 # TLS backend. `blocking` is used from a dedicated thread, never inside a runtime.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde_json = "1"
+dotenvy = "0.15"
 # host build of the program crate for its account/instruction types only
-stocklana = { path = "../programs/stocklana", features = ["no-entrypoint"] }
+tessen = { path = "../programs/tessen", features = ["no-entrypoint"] }
+
+[target.'cfg(target_env = "musl")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

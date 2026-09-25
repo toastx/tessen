@@ -1,5 +1,5 @@
 // Display helpers. Everything on chain is u64 at 1e6 (see SCALE in
-// programs/stocklana/src/lib.rs) — `ui()` is the only place that divides.
+// programs/tessen/src/lib.rs) — `ui()` is the only place that divides.
 
 export const SCALE = 1_000_000;
 

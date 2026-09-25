@@ -11,7 +11,7 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 use solana_sdk::transaction::Transaction;
 
-use stocklana::{payoff, required_collateral, Oracle, Pool};
+use tessen::{payoff, required_collateral, Oracle, Pool};
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -99,18 +99,21 @@ impl Chain {
         Ok(T::try_deserialize(&mut data.as_slice())?)
     }
 
-    /// Every account of type `T` owned by the program. The discriminator check
-    /// in `try_deserialize` is the filter, so accounts of other types drop out.
+    /// Every account of type `T` owned by the program. Other account types are
+    /// skipped by discriminator; malformed matching accounts are reported.
     pub async fn all<T: AccountDeserialize + Discriminator>(&self) -> Res<Vec<(Pubkey, T)>> {
         let raw = self.rpc.get_program_accounts(&self.program_id).await?;
-        Ok(raw
-            .into_iter()
-            .filter_map(|(pk, acct)| {
-                T::try_deserialize(&mut acct.data.as_slice())
-                    .ok()
-                    .map(|t| (pk, t))
-            })
-            .collect())
+        let mut accounts = Vec::new();
+        for (key, account) in raw {
+            if !account.data.starts_with(T::DISCRIMINATOR) {
+                continue;
+            }
+            match T::try_deserialize(&mut account.data.as_slice()) {
+                Ok(decoded) => accounts.push((key, decoded)),
+                Err(error) => eprintln!("skipping incompatible account {key}: {error}"),
+            }
+        }
+        Ok(accounts)
     }
 
     /// Build a `buy_option` transaction, fee-payable by `buyer`, already signed
@@ -134,7 +137,7 @@ impl Chain {
             &self.program_id,
         )
         .0;
-        let metas = stocklana::accounts::BuyOption {
+        let metas = tessen::accounts::BuyOption {
             buyer: *buyer,
             quote_signer: quote_signer.pubkey(),
             pool: *pool_key,
@@ -146,7 +149,7 @@ impl Chain {
             system_program: solana_sdk::system_program::ID,
         }
         .to_account_metas(None);
-        let data = stocklana::instruction::BuyOption {
+        let data = tessen::instruction::BuyOption {
             id,
             strike,
             size,

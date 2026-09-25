@@ -16,10 +16,11 @@ import {
   mintTo,
 } from "@solana/spl-token";
 import { assert } from "chai";
-import { Stocklana } from "../target/types/stocklana";
+import { tessen } from "../target/types/tessen";
 
 const S = 1_000_000;
 const PUT = 0;
+const MAIN_POOL_NAME = "POOL:TEST:MAIN";
 const RING = 32;
 // the program's own floor: fewer in-window samples than this and the epoch refuses to latch
 const MIN_SETTLEMENT_SAMPLES = 8;
@@ -29,10 +30,10 @@ const MIN_SETTLEMENT_SAMPLES = 8;
 const MIN_PUSH_INTERVAL = 30;
 const usd = (n: number) => new BN(n * S);
 
-describe("stocklana cash-secured put vault", () => {
+describe("Tessen cash-secured put vault", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
-  const program = anchor.workspace.stocklana as Program<Stocklana>;
+  const program = anchor.workspace.tessen as Program<tessen>;
   const admin = (provider.wallet as anchor.Wallet).payer;
 
   const lp = Keypair.generate();
@@ -287,10 +288,12 @@ describe("stocklana cash-secured put vault", () => {
     return { underlying: u, oracle: o, feed: makeFeed(o) };
   };
 
+  let poolNonce = 0;
   const newPool = async (oracleKey: PublicKey, underlyingMint: PublicKey) => {
     const collateral = await createMint(provider.connection, admin, admin.publicKey, null, 6);
+    const poolName = `POOL:TEST:${++poolNonce}`;
     const [p] = PublicKey.findProgramAddressSync(
-      [Buffer.from("pool"), collateral.toBuffer(), Buffer.from([PUT])],
+      [Buffer.from("pool"), collateral.toBuffer(), Buffer.from([PUT]), Buffer.from(poolName)],
       program.programId
     );
     const [v] = PublicKey.findProgramAddressSync(
@@ -298,7 +301,7 @@ describe("stocklana cash-secured put vault", () => {
       program.programId
     );
     await program.methods
-      .initPool(PUT, admin.publicKey, poolKeeper.publicKey)
+      .initPool(PUT, poolName, admin.publicKey, poolKeeper.publicKey)
       .accountsPartial({
         admin: admin.publicKey,
         collateralMint: collateral,
@@ -338,7 +341,7 @@ describe("stocklana cash-secured put vault", () => {
       program.programId
     );
     [pool] = PublicKey.findProgramAddressSync(
-      [Buffer.from("pool"), usdc.toBuffer(), Buffer.from([PUT])],
+      [Buffer.from("pool"), usdc.toBuffer(), Buffer.from([PUT]), Buffer.from(MAIN_POOL_NAME)],
       program.programId
     );
     [vault] = PublicKey.findProgramAddressSync(
@@ -357,7 +360,7 @@ describe("stocklana cash-secured put vault", () => {
       .rpc();
 
     await program.methods
-      .initPool(PUT, admin.publicKey, poolKeeper.publicKey)
+      .initPool(PUT, MAIN_POOL_NAME, admin.publicKey, poolKeeper.publicKey)
       .accountsPartial({
         admin: admin.publicKey,
         collateralMint: usdc,
@@ -384,6 +387,35 @@ describe("stocklana cash-secured put vault", () => {
   it("refuses a dust deposit that would set the share scale", async () => {
     // total_shares == 0: this deposit would otherwise mint 1:1 and fix a coarse scale
     await expectRevert(() => depositUsd(0.5), "FirstDepositTooSmall");
+  });
+
+  it("allows multiple named PUT pools for one collateral mint", async () => {
+    const poolName = "POOL:TEST:SECOND";
+    const [secondPool] = PublicKey.findProgramAddressSync(
+      [Buffer.from("pool"), usdc.toBuffer(), Buffer.from([PUT]), Buffer.from(poolName)],
+      program.programId
+    );
+    const [secondVault] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), secondPool.toBuffer()],
+      program.programId
+    );
+    await program.methods
+      .initPool(PUT, poolName, admin.publicKey, poolKeeper.publicKey)
+      .accountsPartial({
+        admin: admin.publicKey,
+        collateralMint: usdc,
+        underlying,
+        oracle,
+        pool: secondPool,
+        vault: secondVault,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc();
+    const created = await program.account.pool.fetch(secondPool);
+    assert.equal(created.poolName, poolName);
+    assert.equal(created.available.toNumber(), 0);
+    assert.equal(created.totalShares.toNumber(), 0);
   });
 
   it("deposits collateral and mints shares", async () => {
@@ -455,8 +487,9 @@ describe("stocklana cash-secured put vault", () => {
   it("rejects a call pool whose oracle prices a different mint", async () => {
     // CALL wants collateral_mint == underlying; this passes USDC as both, so the
     // oracle's underlying is now a different mint from the one the pool names
+    const poolName = "POOL:TEST:CALL";
     const [callPool] = PublicKey.findProgramAddressSync(
-      [Buffer.from("pool"), usdc.toBuffer(), Buffer.from([1])],
+      [Buffer.from("pool"), usdc.toBuffer(), Buffer.from([1]), Buffer.from(poolName)],
       program.programId
     );
     const [callVault] = PublicKey.findProgramAddressSync(
@@ -466,7 +499,7 @@ describe("stocklana cash-secured put vault", () => {
     await expectRevert(
       () =>
         program.methods
-          .initPool(1, admin.publicKey, poolKeeper.publicKey)
+          .initPool(1, poolName, admin.publicKey, poolKeeper.publicKey)
           .accountsPartial({
             admin: admin.publicKey,
             collateralMint: usdc,
@@ -500,8 +533,9 @@ describe("stocklana cash-secured put vault", () => {
 
     // PUT wants collateral_mint != underlying, so this pairing is otherwise legal:
     // the only thing rejecting it is the oracle/underlying binding themselves
+    const poolName = "POOL:TEST:WRONG";
     const [wrongPool] = PublicKey.findProgramAddressSync(
-      [Buffer.from("pool"), otherMint.toBuffer(), Buffer.from([PUT])],
+      [Buffer.from("pool"), otherMint.toBuffer(), Buffer.from([PUT]), Buffer.from(poolName)],
       program.programId
     );
     const [wrongVault] = PublicKey.findProgramAddressSync(
@@ -511,7 +545,7 @@ describe("stocklana cash-secured put vault", () => {
     await expectRevert(
       () =>
         program.methods
-          .initPool(PUT, admin.publicKey, poolKeeper.publicKey)
+          .initPool(PUT, poolName, admin.publicKey, poolKeeper.publicKey)
           .accountsPartial({
             admin: admin.publicKey,
             collateralMint: otherMint,

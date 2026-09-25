@@ -26,7 +26,7 @@ impl Db {
                 updated_ts INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS cache_kind_pool ON cache(kind, pool);
-            CREATE INDEX IF NOT EXISTS cache_owner ON cache(owner);",
+             CREATE INDEX IF NOT EXISTS cache_owner ON cache(owner);",
         )?;
         Ok(Db(Mutex::new(conn)))
     }
@@ -92,16 +92,49 @@ mod tests {
     #[test]
     fn upsert_get_list_roundtrip() {
         let db = Db::open(":memory:").unwrap();
-        db.upsert("P1", "pool", None, None, r#"{"epoch":1}"#, 10).unwrap();
-        db.upsert("X1", "position", Some("P1"), Some("alice"), r#"{"id":1}"#, 10).unwrap();
-        db.upsert("X2", "position", Some("P1"), Some("bob"), r#"{"id":2}"#, 10).unwrap();
+        db.upsert("P1", "pool", None, None, r#"{"epoch":1}"#, 10)
+            .unwrap();
+        db.upsert(
+            "X1",
+            "position",
+            Some("P1"),
+            Some("alice"),
+            r#"{"id":1}"#,
+            10,
+        )
+        .unwrap();
+        db.upsert("X2", "position", Some("P1"), Some("bob"), r#"{"id":2}"#, 10)
+            .unwrap();
+        db.upsert("P2", "pool", Some("P2"), None, r#"{"epoch":4}"#, 10)
+            .unwrap();
+        db.upsert(
+            "X3",
+            "position",
+            Some("P2"),
+            Some("alice"),
+            r#"{"id":3}"#,
+            10,
+        )
+        .unwrap();
         // update in place
-        db.upsert("P1", "pool", None, None, r#"{"epoch":2}"#, 20).unwrap();
+        db.upsert("P1", "pool", None, None, r#"{"epoch":2}"#, 20)
+            .unwrap();
 
         assert_eq!(db.get("P1").unwrap().as_deref(), Some(r#"{"epoch":2}"#));
         assert_eq!(db.get("nope").unwrap(), None);
         assert_eq!(db.list("position", Some("P1"), None).unwrap().len(), 2);
-        assert_eq!(db.list("position", Some("P1"), Some("alice")).unwrap().len(), 1);
-        assert_eq!(db.list("pool", None, None).unwrap().len(), 1);
+        assert_eq!(
+            db.list("position", Some("P1"), Some("alice"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.list("position", Some("P2"), Some("alice"))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(db.list("pool", None, None).unwrap().len(), 2);
     }
 }

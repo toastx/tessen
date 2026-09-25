@@ -29,6 +29,7 @@ pub const MIN_PUSH_INTERVAL: i64 = 30;
 pub const MIN_SETTLEMENT_SPAN: i64 = 900;
 /// Floor on a quote's premium, in bps of the position's collateral.
 pub const MIN_PREMIUM_BPS: u64 = 10;
+pub const MAX_POOL_NAME_BYTES: usize = 32;
 
 /// Where the pool is in the epoch cycle. `Genesis` is a pool that has never
 /// opened an epoch, and it is a state in its own right rather than epoch 0
@@ -55,27 +56,33 @@ macro_rules! pool_seeds {
             b"pool".as_ref(),
             $pool.collateral_mint.as_ref(),
             std::slice::from_ref(&$pool.kind),
+            $pool.pool_name.as_bytes(),
             std::slice::from_ref(&$pool.bump),
         ]
     };
 }
 
 #[program]
-pub mod stocklana {
+pub mod tessen {
     use super::*;
 
     pub fn init_pool(
         ctx: Context<InitPool>,
         kind: u8,
+        pool_name: String,
         quote_signer: Pubkey,
         keeper: Pubkey,
     ) -> Result<()> {
         require!(kind <= KIND_CALL, StockError::BadKind);
         require!(
+            !pool_name.is_empty() && pool_name.len() <= MAX_POOL_NAME_BYTES,
+            StockError::BadPoolName
+        );
+        require!(
             ctx.accounts.oracle.underlying == ctx.accounts.underlying.key(),
             StockError::OracleMintMismatch
         );
-        
+
         if kind == KIND_CALL {
             require!(
                 ctx.accounts.collateral_mint.key() == ctx.accounts.underlying.key(),
@@ -91,6 +98,7 @@ pub mod stocklana {
         pool.authority = ctx.accounts.admin.key();
         pool.keeper = keeper;
         pool.kind = kind;
+        pool.pool_name = pool_name;
         pool.collateral_mint = ctx.accounts.collateral_mint.key();
         pool.vault = ctx.accounts.vault.key();
         pool.oracle = ctx.accounts.oracle.key();
@@ -225,7 +233,10 @@ pub mod stocklana {
         require!(pool.open_positions == 0, StockError::EpochActive);
         let assets = pool.assets()?;
         let shares = if pool.total_shares == 0 {
-            require!(amount >= MIN_FIRST_DEPOSIT, StockError::FirstDepositTooSmall);
+            require!(
+                amount >= MIN_FIRST_DEPOSIT,
+                StockError::FirstDepositTooSmall
+            );
             amount
         } else {
             mul_div(amount, pool.total_shares, assets)?
@@ -309,7 +320,10 @@ pub mod stocklana {
         let now = Clock::get()?.unix_timestamp;
         let expiry = ctx.accounts.pool.epoch_end;
         require_writable(&ctx.accounts.pool, now, quote_expiry)?;
-        require!(strike > 0 && size > 0 && premium > 0, StockError::ZeroAmount);
+        require!(
+            strike > 0 && size > 0 && premium > 0,
+            StockError::ZeroAmount
+        );
 
         // an option is never worth less than its intrinsic value, whatever the backend signs
         let spot = median(&ctx.accounts.oracle, now)?;
@@ -325,7 +339,10 @@ pub mod stocklana {
             premium as u128 * BPS as u128 >= collateral as u128 * MIN_PREMIUM_BPS as u128,
             StockError::PremiumTooSmall
         );
-        require!(collateral <= pool.available, StockError::InsufficientAvailable);
+        require!(
+            collateral <= pool.available,
+            StockError::InsufficientAvailable
+        );
 
         token::transfer(
             CpiContext::new(
@@ -405,7 +422,6 @@ pub mod stocklana {
         });
         Ok(())
     }
-
 
     pub fn force_settle(ctx: Context<ForceSettle>) -> Result<()> {
         let pool_key = ctx.accounts.pool.key();
@@ -552,7 +568,6 @@ fn within_deviation(price: u64, med: u64) -> bool {
     (price.abs_diff(med) as u128) * (BPS as u128) <= (med as u128) * (MAX_DEV_BPS as u128)
 }
 
-
 fn median_of(buf: &mut [u64; SAMPLES], n: usize) -> Option<u64> {
     if n == 0 {
         return None;
@@ -593,10 +608,7 @@ fn window_median(o: &Oracle, start: i64, end: i64) -> Result<(u64, u8)> {
             newest = newest.max(ts);
         }
     }
-    require!(
-        n >= MIN_SETTLEMENT_SAMPLES,
-        StockError::InsufficientSamples
-    );
+    require!(n >= MIN_SETTLEMENT_SAMPLES, StockError::InsufficientSamples);
     require!(
         newest - oldest >= MIN_SETTLEMENT_SPAN,
         StockError::SettlementWindowTooShort
@@ -654,6 +666,8 @@ pub struct Pool {
     /// Share price stamped at the roll that opened the current epoch.
     pub share_price_open: u64,
     pub kind: u8,
+    #[max_len(32)]
+    pub pool_name: String,
     pub bump: u8,
 }
 
@@ -830,7 +844,7 @@ pub struct ForceSettleEvent {
 }
 
 #[derive(Accounts)]
-#[instruction(kind: u8)]
+#[instruction(kind: u8, pool_name: String)]
 pub struct InitPool<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
@@ -844,7 +858,7 @@ pub struct InitPool<'info> {
         init,
         payer = admin,
         space = 8 + Pool::INIT_SPACE,
-        seeds = [b"pool", collateral_mint.key().as_ref(), &[kind]],
+        seeds = [b"pool", collateral_mint.key().as_ref(), &[kind], pool_name.as_bytes()],
         bump
     )]
     pub pool: Account<'info, Pool>,
@@ -1083,6 +1097,8 @@ pub enum StockError {
     NoSamples,
     #[msg("bad option kind")]
     BadKind,
+    #[msg("pool name must contain 1 to 32 UTF-8 bytes")]
+    BadPoolName,
     #[msg("bad price")]
     BadPrice,
     #[msg("not the owner")]
@@ -1196,7 +1212,11 @@ mod tests {
         let mut s: Vec<(u64, i64)> = (0..12).map(|i| (200 * S, 1_000 + i * 100)).collect();
         s.extend((0..12).map(|i| (300 * S, 9_000 + i)));
         let (price, n) = window_median(&oracle_with(&s), 900, 2_100).unwrap();
-        assert_eq!(price, 200 * S, "post-window prints must not settle the epoch");
+        assert_eq!(
+            price,
+            200 * S,
+            "post-window prints must not settle the epoch"
+        );
         assert_eq!(n, 12);
     }
 

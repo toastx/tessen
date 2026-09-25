@@ -1,0 +1,16 @@
+.git
+.github
+.anchor
+.DS_Store
+.env
+**/.env
+keys
+target
+**/target
+node_modules
+**/node_modules
+test-ledger
+app/dist
+*.log
+*.db
+*.price

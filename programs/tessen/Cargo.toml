@@ -1,12 +1,12 @@
 [package]
-name = "stocklana"
+name = "tessen"
 version = "0.1.0"
 description = "Cash-secured option vaults"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "stocklana"
+name = "tessen"
 
 [features]
 default = []
