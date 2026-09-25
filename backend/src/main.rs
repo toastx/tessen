@@ -40,6 +40,7 @@ use serde_json::{json, Value};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 use tokio::sync::broadcast;
+use tower_http::cors::CorsLayer;
 
 use chain::{price, spot_from, Chain};
 use db::Db;
@@ -469,6 +470,9 @@ async fn main() -> Res<()> {
         .route("/quote", post(quote))
         .route("/buy", post(buy))
         .route("/ws", get(ws))
+        // Browser app on another origin. No cookies or auth headers anywhere in
+        // this API, so there is nothing for a permissive policy to leak.
+        .layer(CorsLayer::permissive())
         .with_state(state.clone());
 
     let bind = env("BIND")
