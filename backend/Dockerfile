@@ -1,8 +1,6 @@
 # syntax=docker/dockerfile:1.7
-ARG TARGETPLATFORM
-
-FROM --platform=$TARGETPLATFORM rust:1.89-slim-bookworm AS builder
-ARG TARGETARCH
+FROM rust:1.89-slim-bookworm AS builder
+ARG TARGETARCH=amd64
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -30,7 +28,7 @@ RUN case "$TARGETARCH" in \
     && mkdir /out \
     && cp "backend/target/$rust_target/release/tessen-backend" /out/tessen-backend
 
-FROM --platform=$TARGETPLATFORM alpine:3.22 AS runtime
+FROM alpine:3.22 AS runtime
 RUN apk add --no-cache ca-certificates libgcc \
     && addgroup -S tessen \
     && adduser -S -G tessen tessen \
