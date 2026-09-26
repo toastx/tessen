@@ -1,5 +1,10 @@
 # Stage 1: Build
-FROM rustlang/rust:nightly-slim AS builder
+# Pinned to bookworm to match the runtime stage below. rustlang/rust:nightly-slim
+# tracks Debian testing, and when it rolled to trixie the binary started needing
+# GLIBC_2.39, which bookworm cannot provide: the container then dies on exec with
+# "version `GLIBC_2.39' not found" and no application log at all. Both stages
+# move together or not at all. Nothing here needs nightly.
+FROM rust:slim-bookworm AS builder
 
 WORKDIR /app
 
@@ -24,8 +29,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     libudev1 \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/keeper/target/release/tessen-keeper /usr/local/bin/server
 
+# A panic in either worker should say where, since the host's log view is the
+# only thing that can tell us.
+ENV RUST_BACKTRACE=1
+
+# The keeper is a supervisor that forks one worker per pool, so it must not be
+# PID 1: an unhandled SIGTERM is ignored by PID 1, and orphaned workers would
+# never be reaped. tini forwards signals and reaps, so a restart is a restart.
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["server"]

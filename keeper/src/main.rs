@@ -12,11 +12,17 @@
 //!   POOL_2              required — second pool PDA
 //!   EPOCH_LEN_SECS_2    required — second pool's epoch length
 //!   KEEPER_PRIVATE_KEY  required — fee payer, signs push/close/settle
-//!   AUTHORITY_PRIVATE_KEY optional — signs roll_epoch (default: keeper key)
+//!   KEEPER_KEYPAIR      alternative to the above: a path instead of inline bytes
+//!   AUTHORITY_PRIVATE_KEY optional — signs roll_epoch (default: keeper key).
+//!                       roll_epoch is has_one = authority, so this MUST be the
+//!                       pool authority or the pool never leaves genesis.
+//!   AUTHORITY_KEYPAIR   alternative to the above: a path instead of inline bytes
 //!   PRICE_URL           preStocks API, default https://prestocks.com/api/prestocks
 //!   PRICE_SYMBOL        which preStock to track, default ANTHROPIC
 //!   PRICE_FIELD         mark|token (or the full markPrice/tokenPrice), default mark
-//!   PRICE_POLL_SECS     how often the poller refetches, default 30
+//!   PRICE_POLL_SECS     how often EACH worker's poller refetches, default 120.
+//!                       Two workers means two pollers: prestocks answers 429 if
+//!                       this is set as low as the push interval.
 //!   PRICE_FILE          override: a file of dollars ("212.34"), re-read every tick
 //!   PRICE_1E6           override: a static 1e6-scaled price, for offline runs
 //!   PUSH_INTERVAL_SECS  default 60
@@ -37,7 +43,7 @@ use anchor_client::solana_sdk::signature::Keypair;
 use anchor_client::solana_sdk::signer::Signer;
 use anchor_client::{Client, Cluster, Program};
 
-use tessen::{EpochState, OptionPosition, Oracle, Pool};
+use tessen::{EpochState, OptionPosition, Oracle, Pool, MIN_PUSH_INTERVAL};
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -111,11 +117,31 @@ fn parse_keypair(value: &str, name: &str) -> Res<Keypair> {
     Keypair::try_from(bytes.as_slice()).map_err(|e| format!("invalid {name}: {e}").into())
 }
 
+/// A signer named either inline (`X_PRIVATE_KEY`, a JSON byte array — what a
+/// hosting dashboard can hold) or by file (`X_KEYPAIR`, a path — what a laptop
+/// has). Same bytes either way; the file form just keeps the key out of shell
+/// history and process env.
+fn load_signer(role: &str) -> Res<Option<Keypair>> {
+    let inline = format!("{role}_PRIVATE_KEY");
+    if let Some(value) = env(&inline) {
+        return parse_keypair(&value, &inline).map(Some);
+    }
+    let path_key = format!("{role}_KEYPAIR");
+    match env(&path_key) {
+        Some(path) => {
+            let value = std::fs::read_to_string(&path)
+                .map_err(|e| format!("{path_key}: cannot read {path}: {e}"))?;
+            parse_keypair(value.trim(), &path_key).map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
 fn load_config() -> Res<Config> {
-    let keeper_value = env("KEEPER_PRIVATE_KEY").ok_or("KEEPER_PRIVATE_KEY is required")?;
-    let keeper = parse_keypair(&keeper_value, "KEEPER_PRIVATE_KEY")?;
-    let authority = match env("AUTHORITY_PRIVATE_KEY") {
-        Some(value) => parse_keypair(&value, "AUTHORITY_PRIVATE_KEY")?,
+    let keeper = load_signer("KEEPER")?
+        .ok_or("KEEPER_PRIVATE_KEY (or KEEPER_KEYPAIR) is required")?;
+    let authority = match load_signer("AUTHORITY")? {
+        Some(keypair) => keypair,
         None => Keypair::try_from(&keeper.to_bytes()[..]).unwrap(), // default: same desk key
     };
     Ok(Config {
@@ -320,7 +346,7 @@ impl PriceSource {
             Duration::from_secs(
                 env("PRICE_POLL_SECS")
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(30),
+                    .unwrap_or(120),
             ),
         )))
     }
@@ -420,6 +446,9 @@ impl<'a> Keeper<'a> {
 
     fn do_push(&self, pool: &Pool) -> Res<()> {
         let oracle = self.program.account::<Oracle>(pool.oracle)?;
+        if !push_is_due(oracle.last_update, now_ts(), self.cfg.push_interval) {
+            return Ok(());
+        }
         let target = self.cfg.price.target()?;
         let price = match ring_median(&oracle.samples[..oracle.count as usize]) {
             Some(med) => clamp_band(target, med),
@@ -520,6 +549,20 @@ impl<'a> Keeper<'a> {
     }
 }
 
+/// One oracle serves every pool on the underlying — the PDA is `[b"oracle",
+/// underlying]` — so a sibling worker's push is also ours, and the cadence that
+/// matters is the ORACLE's, not each worker's.
+///
+/// This is load-bearing, not politeness. Two workers pushing independently halve
+/// the interval, and the 32-slot ring then reaches back half as far: at 60s it
+/// spans 32 minutes, comfortably past the 30-minute `SETTLEMENT_WINDOW`, but at
+/// 32s it spans 17 and a close running a couple of minutes late finds too short
+/// a span to settle. Deferring to the sibling keeps the ring long.
+fn push_is_due(last_update: i64, now: i64, interval: Duration) -> bool {
+    let interval = interval.as_secs().max(MIN_PUSH_INTERVAL as u64) as i64;
+    now - last_update >= interval
+}
+
 fn run_worker() -> Res<()> {
     let cfg = load_config()?;
     let cluster = Cluster::Custom(cfg.rpc_url.clone(), cfg.rpc_url.clone());
@@ -614,6 +657,15 @@ fn supervise_workers(mut workers: Vec<(PoolConfig, Child)>) -> Res<()> {
 fn spawn_workers(exe: &std::path::Path, configs: [PoolConfig; 2]) -> Res<Vec<(PoolConfig, Child)>> {
     let mut workers = Vec::with_capacity(configs.len());
     for cfg in configs {
+        // Workers share one oracle (its PDA is per-underlying) and each ticks on a
+        // fixed interval, so whatever offset they start with is the offset they
+        // keep. Spawned in the same instant they stay in lockstep forever and one
+        // of them eats PushTooSoon every single tick — `push_is_due` cannot help,
+        // because both read the same pre-push `last_update`. Give the later worker
+        // daylight instead.
+        if !workers.is_empty() {
+            std::thread::sleep(Duration::from_secs(MIN_PUSH_INTERVAL as u64 + 2));
+        }
         match spawn_worker(exe, &cfg) {
             Ok(child) => workers.push((cfg, child)),
             Err(error) => {
@@ -647,6 +699,19 @@ mod tests {
     // is always a push the chain would accept.
     fn within(p: u64, med: u64) -> bool {
         (p.abs_diff(med) as u128) * BPS <= (med as u128) * MAX_DEV_BPS
+    }
+
+    #[test]
+    fn push_skipped_while_a_sibling_worker_just_pushed() {
+        let every = Duration::from_secs(60);
+        // the sibling pushed 5s ago: our push would be rejected on chain
+        assert!(!push_is_due(1_000, 1_005, every));
+        // and at 32s it would be accepted -- but halve the ring's reach, which is
+        // what leaves a late close with too short a settlement span
+        assert!(!push_is_due(1_000, 1_032, every));
+        assert!(push_is_due(1_000, 1_060, every));
+        // never below the program's own floor, whatever the interval says
+        assert!(!push_is_due(1_000, 1_010, Duration::from_secs(1)));
     }
 
     #[test]

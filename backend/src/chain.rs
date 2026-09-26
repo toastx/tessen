@@ -11,9 +11,12 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::{Keypair, Signer};
 use solana_sdk::transaction::Transaction;
 
-use tessen::{payoff, required_collateral, Oracle, Pool};
+use tessen::{payoff, required_collateral, Oracle, Pool, BPS, KIND_PUT, MIN_PREMIUM_BPS, SCALE};
 
 type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+/// 365d. The epoch is hours long; leap years are far below the oracle's noise.
+const SECS_PER_YEAR: f64 = 31_536_000.0;
 
 pub struct Chain {
     pub rpc: RpcClient,
@@ -55,35 +58,111 @@ pub struct Quote {
     pub intrinsic: u64,
     pub collateral: u64,
     pub premium: u64,
+    /// Settlement price at which the buyer nets zero.
+    pub breakeven: u64,
     pub quote_expiry: i64,
 }
 
-/// Price an option at/above intrinsic. The premium reuses the program's own
-/// `payoff`/`required_collateral`, so the on-chain `premium >= intrinsic` floor
-/// can never reject a quote we produced (barring the oracle moving under us,
-/// which the spread cushions).
+/// Standard normal CDF — Zelen & Severo 26.2.17, |error| < 7.5e-8. No erf in
+/// std and no new dep for six lines.
+fn norm_cdf(x: f64) -> f64 {
+    let (sign, x) = if x < 0.0 { (-1.0, -x) } else { (1.0, x) };
+    let t = 1.0 / (1.0 + 0.2316419 * x);
+    let poly = t
+        * (0.319381530
+            + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+    let tail = (-0.5 * x * x).exp() / (2.0 * std::f64::consts::PI).sqrt() * poly;
+    0.5 * (1.0 + sign * (1.0 - 2.0 * tail))
+}
+
+/// Black-Scholes put, r = 0, all inputs in UI units (dollars, years). r = 0
+/// because the epoch is hours long: a rate term would move the price less than
+/// the oracle's own tick.
+fn bs_put(spot: f64, strike: f64, t_years: f64, sigma: f64) -> f64 {
+    if t_years <= 0.0 || sigma <= 0.0 || spot <= 0.0 {
+        return (strike - spot).max(0.0);
+    }
+    let sq = sigma * t_years.sqrt();
+    let d1 = ((spot / strike).ln() + 0.5 * sigma * sigma * t_years) / sq;
+    strike * norm_cdf(sq - d1) - spot * norm_cdf(-d1)
+}
+
+/// Price an option at/above intrinsic. Puts are priced off Black-Scholes at
+/// `vol_bps` annualised, so both time to expiry and moneyness are in the number
+/// — a flat percentage of collateral charged the same 2% for a 1h option as for
+/// a 24h one, and the same for a 10% OTM strike as for an ATM one.
+///
+/// `spread_bps` is the markup over fair value (the pool's edge), and the result
+/// is floored at the program's own `MIN_PREMIUM_BPS` of collateral so a
+/// far-OTM quote can never be dust that locks real collateral for nothing.
+///
+/// ponytail: KIND_CALL keeps the old flat-spread formula. The program's call
+/// payoff is inverse (`(spot-strike)*size/spot`, collateralised in the
+/// underlying), which is not what `bs_put`'s mirror prices; no call pool exists
+/// yet. Price that shape when the first one does.
+#[allow(clippy::too_many_arguments)]
 pub fn price(
     kind: u8,
     strike: u64,
     size: u64,
     spot: u64,
     spread_bps: u64,
+    vol_bps: u64,
+    expiry: i64,
     ttl: i64,
     now: i64,
 ) -> Res<Quote> {
     let intrinsic = payoff(kind, strike, size, spot).map_err(|e| e.to_string())?;
     let collateral = required_collateral(kind, strike, size).map_err(|e| e.to_string())?;
-    let spread = ((collateral as u128 * spread_bps as u128) / 10_000) as u64;
-    let premium = intrinsic
-        .checked_add(spread.max(1)) // never quote a zero premium; the chain rejects it
-        .ok_or("premium overflow")?;
+    let markup = 1.0 + spread_bps as f64 / BPS as f64;
+    let fair = if kind == KIND_PUT {
+        let contracts = size as f64 / SCALE as f64;
+        let t = (expiry - now).max(0) as f64 / SECS_PER_YEAR;
+        bs_put(
+            spot as f64 / SCALE as f64,
+            strike as f64 / SCALE as f64,
+            t,
+            vol_bps as f64 / BPS as f64,
+        ) * contracts
+            * SCALE as f64
+    } else {
+        // old behaviour: intrinsic plus a flat slice of collateral
+        intrinsic as f64 + (collateral as u128 * spread_bps as u128 / BPS as u128) as f64
+    };
+    let floor = (collateral as u128 * MIN_PREMIUM_BPS as u128 / BPS as u128) as u64;
+    let premium = (fair * markup)
+        .max(0.0)
+        .min(u64::MAX as f64)
+        .round() as u64;
+    // three floors, three different reasons: the chain rejects premium < intrinsic,
+    // rejects premium below MIN_PREMIUM_BPS of collateral, and rejects zero
+    let premium = premium
+        .max(intrinsic.checked_add(1).ok_or("premium overflow")?)
+        .max(floor)
+        .max(1);
     Ok(Quote {
         spot,
         intrinsic,
         collateral,
         premium,
+        breakeven: breakeven(kind, strike, size, premium),
         quote_expiry: now + ttl,
     })
+}
+
+/// Settlement price at which the buyer nets zero: they paid `premium`, so the
+/// payoff has to cover it. Puts break even below the strike, calls above it.
+/// Zero when the option can never recover the premium (premium > collateral).
+pub fn breakeven(kind: u8, strike: u64, size: u64, premium: u64) -> u64 {
+    if size == 0 {
+        return 0;
+    }
+    let per_contract = (premium as u128 * SCALE / size as u128) as u64;
+    if kind == KIND_PUT {
+        strike.saturating_sub(per_contract)
+    } else {
+        strike.saturating_add(per_contract)
+    }
 }
 
 impl Chain {
@@ -174,19 +253,68 @@ mod tests {
     use super::*;
     const S: u64 = 1_000_000;
 
+    const HOUR: i64 = 3600;
+    const VOL: u64 = 8000; // 80% annualised
+
+    /// One contract, `hours` to expiry, priced now.
+    fn q1(strike: u64, spot: u64, hours: i64) -> Quote {
+        price(0, strike, S, spot, 200, VOL, hours * HOUR, 60, 0).unwrap()
+    }
+
     #[test]
     fn quote_never_below_intrinsic_and_never_zero() {
         // ITM put: strike 220, spot 200 -> intrinsic 20
-        let q = price(0, 220 * S, S, 200 * S, 200, 60, 1000).unwrap();
+        let q = price(0, 220 * S, S, 200 * S, 200, VOL, HOUR, 60, 1000).unwrap();
         assert_eq!(q.intrinsic, 20 * S);
         assert!(q.premium > q.intrinsic);
         assert_eq!(q.collateral, 220 * S);
         assert_eq!(q.quote_expiry, 1060);
 
         // OTM put: intrinsic 0, premium must still be > 0
-        let q = price(0, 200 * S, S, 220 * S, 200, 60, 0).unwrap();
+        let q = q1(200 * S, 220 * S, 1);
         assert_eq!(q.intrinsic, 0);
         assert!(q.premium > 0);
+    }
+
+    /// The whole point of the Black-Scholes swap: a 1h option is far cheaper
+    /// than a 24h one, where the old flat spread charged both the same.
+    #[test]
+    fn premium_shrinks_with_time_to_expiry() {
+        let hour = q1(1060 * S, 1059 * S, 1);
+        let day = q1(1060 * S, 1059 * S, 24);
+        assert!(day.premium > 4 * hour.premium, "{} vs {}", day.premium, hour.premium);
+        // ~80% IV ATM for 1h lands single-digit dollars, not the old $21
+        assert!((3 * S..8 * S).contains(&hour.premium), "{}", hour.premium);
+    }
+
+    /// ...and the other half: a far-OTM strike is cheap, where the old formula
+    /// charged nearly the ATM price for it.
+    #[test]
+    fn premium_shrinks_as_strike_goes_out_of_the_money() {
+        let atm = q1(1060 * S, 1059 * S, 1);
+        let otm = q1(1000 * S, 1059 * S, 1);
+        assert!(otm.premium * 4 < atm.premium, "{} vs {}", otm.premium, atm.premium);
+        // but never below the program's own MIN_PREMIUM_BPS of collateral
+        assert_eq!(otm.premium, 1000 * S * MIN_PREMIUM_BPS / BPS);
+    }
+
+    #[test]
+    fn breakeven_is_strike_less_premium_per_contract() {
+        let q = q1(1060 * S, 1059 * S, 1);
+        assert_eq!(q.breakeven, 1060 * S - q.premium);
+        // two contracts halve the per-contract premium, so breakeven moves up
+        let two = price(0, 1060 * S, 2 * S, 1059 * S, 200, VOL, HOUR, 60, 0).unwrap();
+        assert_eq!(two.breakeven, 1060 * S - two.premium / 2);
+        // a put that cannot recover its premium floors at zero, never wraps
+        assert_eq!(breakeven(0, 10, S, 99 * S), 0);
+    }
+
+    #[test]
+    fn norm_cdf_matches_known_values() {
+        assert!((norm_cdf(0.0) - 0.5).abs() < 1e-9);
+        assert!((norm_cdf(1.96) - 0.975).abs() < 1e-4);
+        assert!((norm_cdf(-1.96) - 0.025).abs() < 1e-4);
+        assert!(norm_cdf(-40.0) >= 0.0 && norm_cdf(40.0) <= 1.0);
     }
 
     #[test]
@@ -208,3 +336,4 @@ mod tests {
         assert_eq!(spot_from(&o), Some(20));
     }
 }
+

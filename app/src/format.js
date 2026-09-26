@@ -40,6 +40,24 @@ export const payoff = (strikeRaw, sizeRaw, spotRaw) =>
   (Math.max(0, Number(strikeRaw) - Number(spotRaw)) * Number(sizeRaw)) / SCALE;
 
 /**
+ * Settlement price at which a put buyer nets zero — mirrors `breakeven()` in
+ * backend/src/chain.rs. Raw in, raw out. Floors at zero rather than wrapping
+ * when the premium exceeds the strike.
+ */
+export const breakeven = (strikeRaw, sizeRaw, premiumRaw) =>
+  !Number(sizeRaw) ? 0
+    : Math.max(0, Number(strikeRaw) - (Number(premiumRaw) * SCALE) / Number(sizeRaw));
+
+/**
+ * Mark-to-market on an open put: what it would pay at the current spot, less
+ * the premium already paid. RAW in, RAW out, and signed — a losing position is
+ * negative. Not the settled result: `spot` is the live median, and the position
+ * pays out against the 30-minute median at `epoch_end`.
+ */
+export const pnl = (strikeRaw, sizeRaw, premiumRaw, spotRaw) =>
+  payoff(strikeRaw, sizeRaw, spotRaw) - Number(premiumRaw);
+
+/**
  * Upper median of the filled oracle ring — mirrors `spot_from` in
  * backend/src/chain.rs and `median_of` in the program (upper median on even
  * counts). Getting the parity wrong here would show a spot the chain disagrees

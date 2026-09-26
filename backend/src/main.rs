@@ -16,7 +16,8 @@
 //!   PORT                 hosting fallback when BIND is unset
 //!   DB_PATH              default tessen.db
 //!   POLL_SECS            default 5
-//!   SPREAD_BPS           default 200  (2% of collateral, added over intrinsic)
+//!   SPREAD_BPS           default 200  (2% markup over Black-Scholes fair value)
+//!   VOL_BPS              default 8000 (80% annualised IV used to price puts)
 //!   QUOTE_TTL_SECS       default 60   (< on-chain MAX_QUOTE_TTL of 300)
 //!
 //! ponytail: polling indexer (not accountSubscribe), server-side re-pricing on
@@ -53,6 +54,7 @@ struct Cfg {
     program_id: Pubkey,
     quote_signer: Keypair,
     spread_bps: u64,
+    vol_bps: u64,
     quote_ttl: i64,
     poll: Duration,
 }
@@ -92,6 +94,7 @@ fn load_cfg() -> Res<Cfg> {
         spread_bps: env("SPREAD_BPS")
             .and_then(|s| s.parse().ok())
             .unwrap_or(200),
+        vol_bps: env("VOL_BPS").and_then(|s| s.parse().ok()).unwrap_or(8000),
         quote_ttl: env("QUOTE_TTL_SECS")
             .and_then(|s| s.parse().ok())
             .unwrap_or(60),
@@ -337,6 +340,8 @@ async fn priced(
         size,
         spot,
         s.cfg.spread_bps,
+        s.cfg.vol_bps,
+        pool.epoch_end,
         s.cfg.quote_ttl,
         now(),
     )

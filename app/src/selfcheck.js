@@ -1,7 +1,7 @@
 // The money math, checked against the program's own conventions.
 // Run: npm test  (from app/)
 import assert from "node:assert/strict";
-import { SCALE, depositRaw, medianOf, payoff, raw, sharePrice, strikeLadder, ui, usd, num, dur, short } from "./format.js";
+import { SCALE, breakeven, depositRaw, medianOf, payoff, pnl, raw, sharePrice, strikeLadder, ui, usd, num, dur, short } from "./format.js";
 
 // 1e6 scale round-trips, and `raw` refuses what would silently corrupt an amount
 assert.equal(raw(200), 200_000_000);
@@ -76,4 +76,21 @@ assert.equal(depositRaw(0.5, 1_000_000), 500_000);
 assert.equal(depositRaw(25, null), 25_000_000);
 assert.throws(() => depositRaw(-5, null), /positive/);
 
-console.log("ok — scale, share price, payoff, median, strike ladder, max deposit and formatting");
+// breakeven mirrors breakeven() in backend/src/chain.rs: strike less the
+// per-contract premium, so a $4 premium on a $1060 strike breaks even at $1056
+assert.equal(ui(breakeven(raw(1060), raw(1), raw(4))), 1056);
+// per CONTRACT, not per position — 2 contracts for $8 is the same breakeven
+assert.equal(ui(breakeven(raw(1060), raw(2), raw(8))), 1056);
+// never wraps past zero, never divides by a zero size
+assert.equal(breakeven(raw(10), raw(1), raw(99)), 0);
+assert.equal(breakeven(raw(10), 0, raw(1)), 0);
+
+// PnL is payoff-so-far less premium, and is signed: OTM is a full loss
+assert.equal(ui(pnl(raw(1060), raw(1), raw(4), raw(1070))), -4);
+// at breakeven it is exactly zero
+assert.equal(ui(pnl(raw(1060), raw(1), raw(4), raw(1056))), 0);
+// ITM past breakeven it is positive, and scales with size
+assert.equal(ui(pnl(raw(1060), raw(1), raw(4), raw(1000))), 56);
+assert.equal(ui(pnl(raw(1060), raw(2), raw(8), raw(1000))), 112);
+
+console.log("ok — scale, share price, payoff, breakeven, PnL, median, strike ladder, max deposit and formatting");

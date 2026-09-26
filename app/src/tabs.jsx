@@ -3,7 +3,7 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { quote as quoteApi } from "./api";
 import { buyOption, claim, deposit, newPositionId, withdraw } from "./chain";
-import { clock, depositRaw, dur, num, raw, SCALE, short, strikeLadder, ui, usd } from "./format";
+import { breakeven, clock, depositRaw, dur, num, payoff, pnl, raw, SCALE, short, strikeLadder, ui, usd } from "./format";
 
 const TICKER = import.meta.env.VITE_TICKER || null;
 const ticker = oracle => TICKER || (oracle ? short(oracle.underlying) : "underlying");
@@ -21,6 +21,12 @@ const Row = ({ label, value, color, labelColor }) => (
     <span className="mono" style={{ fontSize: 14, color: color || "var(--color-text)" }}>{value}</span>
   </div>
 );
+
+/** Signed money, so a loss reads as -$4.04 rather than $4.04. */
+const signedUsd = raw => raw == null ? "—" : (raw < 0 ? "-" : "") + usd(Math.abs(ui(raw)));
+const pnlColor = raw =>
+  raw == null || raw === 0 ? "var(--color-neutral-500)"
+    : raw > 0 ? "var(--color-accent-400)" : "var(--color-neutral-300)";
 
 const Empty = ({ title, body, cta, onCta }) => (
   <Panel style={{ padding: "52px 40px", maxWidth: 620 }}>
@@ -272,6 +278,10 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
 
   const edge = err ? "var(--color-accent-700)" : q && !expired ? "var(--color-accent-700)" : "var(--color-neutral-800)";
   const presets = strikeLadder(ui(spot));
+  // the backend sends `breakeven`; recompute as a fallback so an older backend
+  // renders a number rather than "$NaN"
+  const be = q ? Number(q.breakeven ?? breakeven(q.strikeRaw, q.sizeRaw, q.premium)) : 0;
+  const beMovePct = q && Number(q.spot) ? ((be - Number(q.spot)) / Number(q.spot)) * 100 : 0;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1.05fr", gap: 14, alignItems: "start" }}>
@@ -355,8 +365,12 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
             <Row label="Oracle spot" value={usd(ui(q.spot))} />
             <Row label="Intrinsic value" value={usd(ui(q.intrinsic))} />
             <Row label="Spread over intrinsic" value={usd(ui(q.premium) - ui(q.intrinsic))} />
+            <Row label="Breakeven settlement price" value={usd(ui(be))} color="var(--color-accent-400)" />
             <Row label="Collateral locked by the pool" value={usd(ui(q.collateral))} />
             <Row label="Max payoff to you" value={usd(ui(q.collateral))} color="var(--color-accent-400)" />
+            <p style={{ fontSize: 11, color: "var(--color-neutral-600)", margin: "10px 0 0", lineHeight: 1.5 }}>
+              You profit only if the settlement median lands below {usd(ui(be))}, {Math.abs(beMovePct).toFixed(2)}% {beMovePct < 0 ? "below" : "above"} spot. At or above {usd(ui(q.strikeRaw))} the put pays nothing and the premium is your whole loss.
+            </p>
 
             <div style={{ flex: 1 }} />
             <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
@@ -380,6 +394,7 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
               <p style={{ margin: "0 0 12px" }}>The pool re-prices server-side on submit. Review, then sign in your wallet — the wallet shows the final premium.</p>
               <Row label="Position" value={`${ticker(oracle)} P ${usd(ui(q.strikeRaw))} × ${ui(q.sizeRaw)}`} />
               <Row label="Premium (quoted)" value={usd(ui(q.premium))} color="var(--color-accent-400)" />
+              <Row label="Breakeven" value={usd(ui(be))} />
               <Row label="Collateral locked" value={usd(ui(q.collateral))} />
               <Row label="Expiry" value={clock(epoch.end)} />
               <p style={{ fontSize: 12, color: "var(--color-neutral-600)", margin: "14px 0 0", lineHeight: 1.5 }}>
@@ -502,7 +517,7 @@ export function Liquidity({ pool, nav, program, publicKey, shares, balance, sett
 }
 
 // ─────────────────────────────────────────────────────────── Positions
-export function Positions({ pool, positions, oracle, program, publicKey, now, settled, flash, setTab }) {
+export function Positions({ pool, positions, oracle, spot, program, publicKey, now, settled, flash, setTab }) {
   const [busy, run] = useTx(settled, flash);
 
   if (!publicKey) return <Empty title="Connect a wallet" body="Your positions in this pool are looked up by your wallet address." />;
@@ -515,7 +530,11 @@ export function Positions({ pool, positions, oracle, program, publicKey, now, se
   const rows = positions.slice().sort((a, b) => b.epoch - a.epoch || b.id - a.id).map(p => {
     const expired = now >= Number(p.expiry);
     const state = p.settled ? (Number(p.payout) > 0 ? "claim" : "worth") : expired ? "await" : "active";
-    return { p, state, ...{
+    // settled positions have a real payout on chain; open ones are marked to the
+    // live oracle median, which is NOT the price they will settle against
+    const value = p.settled ? Number(p.payout) : spot == null ? null : payoff(p.strike, p.size, spot);
+    const net = value == null ? null : value - Number(p.premium);
+    return { p, state, net, be: breakeven(p.strike, p.size, p.premium), ...{
       active: { status: "Active", tag: "tag-accent", label: "Running", cls: "btn-secondary", off: true, edge: "var(--color-neutral-800)" },
       await: { status: "Expired — awaiting settlement", tag: "tag-neutral", label: "Keeper settles", cls: "btn-secondary", off: true, edge: "var(--color-neutral-800)" },
       claim: { status: "Settled — claimable", tag: "tag-outline", label: "Claim payout", cls: "btn-primary", off: false, edge: "var(--color-accent-700)" },
@@ -525,21 +544,24 @@ export function Positions({ pool, positions, oracle, program, publicKey, now, se
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      {rows.map(({ p, status, tag, label, cls, off, edge }) => (
-        <Panel key={p.id} edge={edge} style={{ display: "grid", gridTemplateColumns: "minmax(200px,240px) repeat(4,minmax(0,1fr)) auto", gap: 18, alignItems: "center", padding: "16px 20px" }}>
+      {rows.map(({ p, status, tag, label, cls, off, edge, net, be }) => (
+        <Panel key={p.id} edge={edge} style={{ display: "grid", gridTemplateColumns: "minmax(200px,240px) repeat(5,minmax(0,1fr)) auto", gap: 18, alignItems: "center", padding: "16px 20px" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
             <span className="mono" style={{ fontSize: 16 }}>{ticker(oracle)} P {usd(ui(p.strike))} × {ui(p.size)}</span>
             <span className={"tag " + tag} style={{ alignSelf: "flex-start", whiteSpace: "nowrap" }}>{status}</span>
           </div>
           {[
-            ["Premium paid", usd(ui(p.premium)), null],
-            ["Collateral", usd(ui(p.collateral)), null],
-            ["Epoch / expiry", `#${p.epoch} · ${clock(Number(p.expiry))}`, null],
-            ["Payout", p.settled ? usd(ui(p.payout)) : "—", p.settled && Number(p.payout) > 0 ? "var(--color-accent-400)" : "var(--color-neutral-500)"]
-          ].map(([k, v, c]) => (
+            ["Premium paid", usd(ui(p.premium)), null, null],
+            ["Collateral", usd(ui(p.collateral)), null, null],
+            ["Epoch / expiry", `#${p.epoch} · ${clock(Number(p.expiry))}`, null, null],
+            [p.settled ? "Net P&L" : "Unrealised P&L", signedUsd(net), pnlColor(net),
+              `breakeven ${usd(ui(be))}`],
+            ["Payout", p.settled ? usd(ui(p.payout)) : "—", p.settled && Number(p.payout) > 0 ? "var(--color-accent-400)" : "var(--color-neutral-500)", null]
+          ].map(([k, v, c, sub]) => (
             <div key={k} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <span className="kicker">{k}</span>
               <span className="mono" style={{ fontSize: 15, color: c || "var(--color-text)" }}>{v}</span>
+              {sub && <span className="mono" style={{ fontSize: 11, color: "var(--color-neutral-600)" }}>{sub}</span>}
             </div>
           ))}
           <div style={{ display: "flex", justifyContent: "flex-end" }}>
@@ -552,6 +574,9 @@ export function Positions({ pool, positions, oracle, program, publicKey, now, se
           </div>
         </Panel>
       ))}
+      <p style={{ fontSize: 12, color: "var(--color-neutral-600)", margin: "2px 0 0", lineHeight: 1.5 }}>
+        Unrealised P&amp;L marks open positions to the live oracle median. Each one settles against the 30-minute median at its expiry, so the final number will differ.
+      </p>
     </div>
   );
 }
