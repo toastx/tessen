@@ -3,14 +3,14 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { quote as quoteApi } from "./api";
 import { buyOption, claim, deposit, newPositionId, withdraw } from "./chain";
-import { breakeven, clock, depositRaw, dur, num, payoff, pnl, raw, SCALE, short, strikeLadder, ui, usd } from "./format";
+import { breakeven, clock, depositRaw, dur, num, pnl, raw, SCALE, short, strikeLadder, ui, usd } from "./format";
 
 const TICKER = import.meta.env.VITE_TICKER || null;
 const ticker = oracle => TICKER || (oracle ? short(oracle.underlying) : "underlying");
 
 const Panel = ({ edge, style, ...p }) => (
   <div className="panel" style={{
-    ...(edge ? { boxShadow: `inset 0 1px 0 color-mix(in srgb,var(--color-text) 6%,transparent),0 24px 48px -28px rgba(0,0,0,.8),0 0 0 1px ${edge}` } : null),
+    ...(edge ? { boxShadow: `0 0 0 1px ${edge}` } : null),
     ...style
   }} {...p} />
 );
@@ -286,8 +286,7 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1.05fr", gap: 14, alignItems: "start" }}>
       <Panel style={{ padding: 20 }}>
-        <h4 style={{ margin: "0 0 4px" }}>Buy a put</h4>
-        <p style={{ fontSize: 13, color: "var(--color-neutral-500)", margin: "0 0 18px" }}>Cash-secured by the pool. Premium is always at or above intrinsic value.</p>
+        <h4 style={{ margin: "0 0 18px" }}>Buy a put</h4>
 
         <div className="field" style={{ marginBottom: 14 }}>
           <label htmlFor="strike">Strike price (USDC)</label>
@@ -320,20 +319,12 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
             {!publicKey && <div style={{ marginTop: 10 }}><WalletMultiButton /></div>}
           </div>
         )}
-
-        <div className="rule rule-top" style={{ marginTop: 20, paddingTop: 16 }}>
-          <div className="kicker" style={{ marginBottom: 8 }}>How this settles</div>
-          <p style={{ fontSize: 12, color: "var(--color-neutral-600)", margin: 0, lineHeight: 1.6 }}>
-            At {clock(epoch.end)} the keeper latches the 30-minute median oracle price. You are paid max(0, strike − settle) × size, capped at the collateral locked for the position. The live spot you see now is not the settlement price.
-          </p>
-        </div>
       </Panel>
 
       <Panel edge={edge} style={{ padding: 20, minHeight: 360, display: "flex", flexDirection: "column" }}>
         {!q && !err && (
           <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", gap: 8, maxWidth: "38ch" }}>
             <h4 style={{ margin: 0, color: "var(--color-neutral-600)" }}>No quote yet</h4>
-            <p style={{ fontSize: 13, color: "var(--color-neutral-600)", margin: 0 }}>Set a strike and size, then request a quote. Quotes are priced and signed by the pool's quote signer.</p>
           </div>
         )}
 
@@ -351,7 +342,7 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
             <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 18 }}>
               <div>
                 <div className="kicker">Premium due</div>
-                <div className="mono" style={{ fontSize: 38, fontWeight: 500, letterSpacing: "-0.03em", lineHeight: 1.15, color: expired ? "var(--color-neutral-600)" : "var(--color-text)" }}>{usd(ui(q.premium))}</div>
+                <div className="mono" style={{ fontSize: 28, fontWeight: 500, letterSpacing: "-0.03em", lineHeight: 1.15, color: expired ? "var(--color-neutral-600)" : "var(--color-text)" }}>{usd(ui(q.premium))}</div>
                 <div className="mono" style={{ fontSize: 12, color: "var(--color-neutral-600)" }}>{usd(ui(q.premium) / (ui(q.sizeRaw) || 1), 4)} per contract</div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
@@ -365,12 +356,9 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
             <Row label="Oracle spot" value={usd(ui(q.spot))} />
             <Row label="Intrinsic value" value={usd(ui(q.intrinsic))} />
             <Row label="Spread over intrinsic" value={usd(ui(q.premium) - ui(q.intrinsic))} />
-            <Row label="Breakeven settlement price" value={usd(ui(be))} color="var(--color-accent-400)" />
+            <Row label="Breakeven" value={`${usd(ui(be))}  ${beMovePct < 0 ? "−" : "+"}${Math.abs(beMovePct).toFixed(2)}%`} color="var(--color-accent-400)" />
             <Row label="Collateral locked by the pool" value={usd(ui(q.collateral))} />
             <Row label="Max payoff to you" value={usd(ui(q.collateral))} color="var(--color-accent-400)" />
-            <p style={{ fontSize: 11, color: "var(--color-neutral-600)", margin: "10px 0 0", lineHeight: 1.5 }}>
-              You profit only if the settlement median lands below {usd(ui(be))}, {Math.abs(beMovePct).toFixed(2)}% {beMovePct < 0 ? "below" : "above"} spot. At or above {usd(ui(q.strikeRaw))} the put pays nothing and the premium is your whole loss.
-            </p>
 
             <div style={{ flex: 1 }} />
             <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
@@ -379,9 +367,6 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
               </button>
               <button className="btn btn-secondary" onClick={getQuote} style={{ height: 42 }}>Re-quote</button>
             </div>
-            <p style={{ fontSize: 11, color: "var(--color-neutral-600)", margin: "10px 0 0", lineHeight: 1.5 }}>
-              The pool re-prices on submit; the final premium is shown in the wallet confirm before you sign.
-            </p>
           </div>
         )}
       </Panel>
@@ -391,15 +376,11 @@ export function Trade({ pool, epoch, now, spot, oracle, connection, publicKey, s
           <div className="dialog">
             <div className="dialog-title">Confirm purchase</div>
             <div className="dialog-body">
-              <p style={{ margin: "0 0 12px" }}>The pool re-prices server-side on submit. Review, then sign in your wallet — the wallet shows the final premium.</p>
               <Row label="Position" value={`${ticker(oracle)} P ${usd(ui(q.strikeRaw))} × ${ui(q.sizeRaw)}`} />
               <Row label="Premium (quoted)" value={usd(ui(q.premium))} color="var(--color-accent-400)" />
               <Row label="Breakeven" value={usd(ui(be))} />
               <Row label="Collateral locked" value={usd(ui(q.collateral))} />
               <Row label="Expiry" value={clock(epoch.end)} />
-              <p style={{ fontSize: 12, color: "var(--color-neutral-600)", margin: "14px 0 0", lineHeight: 1.5 }}>
-                Payoff is measured against the 30-minute median at {clock(epoch.end)}, not the current spot.
-              </p>
             </div>
             <div className="dialog-actions">
               <button className="btn btn-secondary" onClick={() => setConfirm(false)}>Cancel</button>
@@ -440,7 +421,6 @@ export function Liquidity({ pool, nav, program, publicKey, shares, balance, sett
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 0.9fr", gap: 14, alignItems: "start" }}>
         <Panel style={{ padding: 20 }}>
           <h4 style={{ margin: "0 0 4px" }}>Deposit</h4>
-          <p style={{ fontSize: 13, color: "var(--color-neutral-500)", margin: "0 0 18px" }}>Mint shares at the current NAV. First deposit must be at least 1 USDC.</p>
           <div className="field" style={{ marginBottom: 14 }}>
             <label htmlFor="dep">Amount (USDC)</label>
             <div style={{ position: "relative" }}>
@@ -473,7 +453,6 @@ export function Liquidity({ pool, nav, program, publicKey, shares, balance, sett
 
         <Panel style={{ padding: 20 }}>
           <h4 style={{ margin: "0 0 4px" }}>Withdraw</h4>
-          <p style={{ fontSize: 13, color: "var(--color-neutral-500)", margin: "0 0 18px" }}>Redeem shares for USDC, bounded by the pool's available balance.</p>
           <div className="field" style={{ marginBottom: 6 }}>
             <label htmlFor="wd">Shares to redeem</label>
             <input id="wd" type="range" min="0" max="100" value={pct} onChange={e => setPct(Number(e.target.value))}
@@ -503,13 +482,10 @@ export function Liquidity({ pool, nav, program, publicKey, shares, balance, sett
             ].map(([label, value, color]) => (
               <div key={label} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                 <span className="kicker">{label}</span>
-                <span className="mono" style={{ fontSize: 19, color: color || "var(--color-text)" }}>{value}</span>
+                <span className="mono" style={{ fontSize: 17, color: color || "var(--color-text)" }}>{value}</span>
               </div>
             ))}
           </div>
-          <p style={{ fontSize: 12, color: "var(--color-neutral-600)", margin: "18px 0 0", lineHeight: 1.5 }}>
-            NAV per share only moves at epoch boundaries, when premium is credited and payouts are paid out.
-          </p>
         </Panel>
       </div>
     </>
@@ -532,8 +508,8 @@ export function Positions({ pool, positions, oracle, spot, program, publicKey, n
     const state = p.settled ? (Number(p.payout) > 0 ? "claim" : "worth") : expired ? "await" : "active";
     // settled positions have a real payout on chain; open ones are marked to the
     // live oracle median, which is NOT the price they will settle against
-    const value = p.settled ? Number(p.payout) : spot == null ? null : payoff(p.strike, p.size, spot);
-    const net = value == null ? null : value - Number(p.premium);
+    const net = p.settled ? Number(p.payout) - Number(p.premium)
+      : spot == null ? null : pnl(p.strike, p.size, p.premium, spot);
     return { p, state, net, be: breakeven(p.strike, p.size, p.premium), ...{
       active: { status: "Active", tag: "tag-accent", label: "Running", cls: "btn-secondary", off: true, edge: "var(--color-neutral-800)" },
       await: { status: "Expired — awaiting settlement", tag: "tag-neutral", label: "Keeper settles", cls: "btn-secondary", off: true, edge: "var(--color-neutral-800)" },
@@ -574,9 +550,6 @@ export function Positions({ pool, positions, oracle, spot, program, publicKey, n
           </div>
         </Panel>
       ))}
-      <p style={{ fontSize: 12, color: "var(--color-neutral-600)", margin: "2px 0 0", lineHeight: 1.5 }}>
-        Unrealised P&amp;L marks open positions to the live oracle median. Each one settles against the 30-minute median at its expiry, so the final number will differ.
-      </p>
     </div>
   );
 }
@@ -627,7 +600,7 @@ export function Status({ pool, epoch, oracle, now }) {
       <Panel style={{ padding: 20 }}>
         <h4 style={{ margin: "0 0 16px" }}>Oracle</h4>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 10 }}>
-          <span className="mono" style={{ fontSize: 32, fontWeight: 500, color: stale ? "var(--color-accent-400)" : "var(--color-text)" }}>{age == null ? "—" : age + "s"}</span>
+          <span className="mono" style={{ fontSize: 20, fontWeight: 500, color: stale ? "var(--color-accent-400)" : "var(--color-text)" }}>{age == null ? "—" : age + "s"}</span>
           <span style={{ fontSize: 13, color: "var(--color-neutral-500)" }}>since last sample · 900s staleness limit</span>
         </div>
         <div style={{ height: 4, borderRadius: 999, background: "var(--color-neutral-900)", overflow: "hidden", marginBottom: 18 }}>
@@ -640,8 +613,7 @@ export function Status({ pool, epoch, oracle, now }) {
         <Row label="Settlement" value={pool.state === "closed" ? `latched at ${usd(ui(pool.settle_price))}` : "idle"} />
       </Panel>
       <Panel style={{ padding: 20 }}>
-        <h4 style={{ margin: "0 0 4px" }}>Accounts</h4>
-        <p style={{ fontSize: 13, color: "var(--color-neutral-500)", margin: "0 0 16px" }}>Read-only. The keeper and authority act out of band.</p>
+        <h4 style={{ margin: "0 0 16px" }}>Accounts</h4>
         {[
           ["Program", pool.program_id], ["Pool", pool.pubkey], ["Vault", pool.vault],
           ["Oracle", pool.oracle], ["Quote signer", pool.quote_signer],

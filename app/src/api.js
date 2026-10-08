@@ -12,8 +12,20 @@ const j = async (path, init) => {
   return body ? JSON.parse(body) : null;
 };
 
+// Pools whose epoch_end passed while no keeper was running. close_epoch needs
+// oracle samples timestamped inside the settlement window, those rotated out of
+// the 32-slot ring long ago, and no later push can be stamped into the past — so
+// these can never close, roll or quote again. The backend indexes every Pool
+// account on chain, dead ones included, so the filter lives here.
+const RETIRED = new Set([
+  "7PFdFWATxJfecWKSwhAnFH29b9uHCmGVpa4MqZWG3CJX", // POOL:ANTHROPIC:1
+  "421TXEePi5d5JaDaudmSaZnn4CurRZY8P7BUgYpQfGe7", // POOL:ANTHROPIC:2
+  "DPnaJ8hm5qA4fY5xyJpi2YSZnf9iGwFCAM7h99qEcZw7", // POOL:ANTHROPIC:3
+  "Hu2tdEtFAf6oSpWwPPGXZcsqQik98ys5Y8c9VzyufXfm", // POOL:ANTHROPIC:4
+]);
+
 const query = values => "?" + new URLSearchParams(values);
-export const getPools = () => j("/pools");
+export const getPools = async () => (await j("/pools")).filter(pool => !RETIRED.has(pool.pubkey));
 export const getEpochs = pool => j("/epochs" + query({ pool }));
 export const getPositions = (pool, owner) => j("/positions" + query({ pool, ...(owner ? { owner } : {}) }));
 
@@ -72,7 +84,7 @@ export function useBackend(owner) {
       ws.onclose = () => { setState(s => ({ ...s, live: false })); if (!closed) setTimeout(open, 3000); };
       ws.onmessage = ev => {
         const m = JSON.parse(ev.data);
-        if (m.type === "pool") setState(s => ({
+        if (m.type === "pool" && !RETIRED.has(m.pubkey)) setState(s => ({
           ...s,
           pools: s.pools.some(pool => pool.pubkey === m.pubkey)
             ? s.pools.map(pool => pool.pubkey === m.pubkey ? m.data : pool)

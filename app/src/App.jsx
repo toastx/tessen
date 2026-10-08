@@ -88,17 +88,13 @@ export default function App({ cluster, onCluster }) {
   return (
     <div style={{ minHeight: "100vh", background: "var(--color-bg)", color: "var(--color-text)", fontFamily: "Inter,system-ui,sans-serif", paddingBottom: 48 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 22, padding: "18px 32px", maxWidth: 1280, margin: "0 auto" }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 9, marginRight: "auto" }}>
-          <span style={{ fontSize: 19, fontWeight: 600, letterSpacing: "-0.02em" }}>tessen</span>
-          <span style={{ fontSize: 11, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--color-accent-500)" }}>cash-secured put vault</span>
-        </div>
-        <nav style={{ display: "flex", gap: 2, padding: 4, borderRadius: 999, background: "color-mix(in srgb,var(--color-surface) 85%,transparent)", boxShadow: "inset 0 1px 0 color-mix(in srgb,var(--color-text) 6%,transparent),0 0 0 1px color-mix(in srgb,var(--color-neutral-700) 45%,transparent)" }}>
+        <span style={{ fontSize: 17, fontWeight: 600, letterSpacing: "-0.02em", marginRight: "auto" }}>tessen</span>
+        <nav style={{ display: "flex", gap: 2 }}>
           {TABS.map(([k, label]) => (
             <button key={k} onClick={() => setTab(k)} style={{
-              background: tab === k ? "color-mix(in srgb,var(--color-accent-800) 75%,transparent)" : "transparent",
-              border: 0, borderRadius: 999, cursor: "pointer", font: "500 13px Inter,system-ui,sans-serif",
-              padding: "7px 14px", flex: "none", whiteSpace: "nowrap",
-              boxShadow: tab === k ? "inset 0 1px 0 color-mix(in srgb,var(--color-accent-300) 18%,transparent)" : "none",
+              background: "transparent", border: 0, borderRadius: "var(--radius-sm)", cursor: "pointer",
+              font: "500 13px Inter,system-ui,sans-serif", padding: "7px 12px", flex: "none", whiteSpace: "nowrap",
+              boxShadow: tab === k ? "inset 0 -2px 0 var(--color-accent-500)" : "none",
               color: tab === k ? "var(--color-text)" : "var(--color-neutral-500)"
             }}>{label}</button>
           ))}
@@ -106,14 +102,14 @@ export default function App({ cluster, onCluster }) {
         {pools.length > 1 && (
           <select value={pool?.pubkey || ""} onChange={e => selectPool(e.target.value)} title="Pool" style={{
             background: "var(--color-surface)", color: "var(--color-neutral-300)", fontSize: 12,
-            border: "1px solid var(--color-divider)", borderRadius: 999, padding: "6px 10px", cursor: "pointer"
+            border: "1px solid var(--color-divider)", borderRadius: "var(--radius-sm)", padding: "6px 10px", cursor: "pointer"
           }}>
             {pools.map(item => <option key={item.pubkey} value={item.pubkey}>{item.pool_name || `Pool ${short(item.pubkey)}`}</option>)}
           </select>
         )}
         <select value={cluster} onChange={e => onCluster(e.target.value)} title="Cluster" style={{
           background: "var(--color-surface)", color: "var(--color-neutral-300)", fontSize: 12,
-          border: "1px solid var(--color-divider)", borderRadius: 999, padding: "6px 10px", cursor: "pointer"
+          border: "1px solid var(--color-divider)", borderRadius: "var(--radius-sm)", padding: "6px 10px", cursor: "pointer"
         }}>
           {Object.entries(CLUSTERS).map(([k, c]) => <option key={k} value={k}>{c.label}</option>)}
         </select>
