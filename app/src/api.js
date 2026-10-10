@@ -22,6 +22,8 @@ const RETIRED = new Set([
   "421TXEePi5d5JaDaudmSaZnn4CurRZY8P7BUgYpQfGe7", // POOL:ANTHROPIC:2
   "DPnaJ8hm5qA4fY5xyJpi2YSZnf9iGwFCAM7h99qEcZw7", // POOL:ANTHROPIC:3
   "Hu2tdEtFAf6oSpWwPPGXZcsqQik98ys5Y8c9VzyufXfm", // POOL:ANTHROPIC:4
+  "43FRqoWt4gAimugcAothBjvNoTLoR9pduCYqmXdof8oK", // POOL:ANTHROPIC:5
+  "7r1a6pKfZjKLVHftJahdB1PJNx1btwHAtKEQQ6ZnK99z", // POOL:ANTHROPIC:6
 ]);
 
 const query = values => "?" + new URLSearchParams(values);
